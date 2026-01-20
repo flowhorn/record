@@ -396,7 +396,7 @@ namespace record_windows
 		if (FAILED(hr)) return hr;
 
 		// Get config values thread-safely
-		int sampleRate = 16000;
+		int sampleRate = 44100;  // Default to AAC-compatible rate
 		int numChannels = 1;
 		int bitRate = 128000;
 		{
@@ -410,6 +410,26 @@ namespace record_windows
 			}
 		}
 
+		// AAC encoder only supports 44.1kHz and 48kHz sample rates
+		// Auto-correct if necessary
+		bool isAacEncoder = (encoderName == AudioEncoder::aacLc ||
+			encoderName == AudioEncoder::aacEld ||
+			encoderName == AudioEncoder::aacHe);
+
+		if (isAacEncoder)
+		{
+			if (sampleRate != 44100 && sampleRate != 48000)
+			{
+				// Use 44.1kHz as default for AAC
+				sampleRate = 44100;
+			}
+			// AAC supports 1, 2, or 6 channels
+			if (numChannels > 2 && numChannels != 6)
+			{
+				numChannels = 2;
+			}
+		}
+
 		// Create output media type
 		IMFMediaType* pOutputType = nullptr;
 		hr = MFCreateMediaType(&pOutputType);
@@ -418,9 +438,7 @@ namespace record_windows
 		hr = pOutputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
 		if (SUCCEEDED(hr))
 		{
-			if (encoderName == AudioEncoder::aacLc ||
-				encoderName == AudioEncoder::aacEld ||
-				encoderName == AudioEncoder::aacHe)
+			if (isAacEncoder)
 			{
 				hr = pOutputType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
 			}
@@ -439,6 +457,7 @@ namespace record_windows
 			}
 		}
 
+		// Set common audio attributes
 		if (SUCCEEDED(hr))
 		{
 			hr = pOutputType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
@@ -451,9 +470,38 @@ namespace record_windows
 		{
 			hr = pOutputType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, numChannels);
 		}
+
+		// Set codec-specific attributes
 		if (SUCCEEDED(hr))
 		{
-			hr = pOutputType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bitRate / 8);
+			if (isAacEncoder)
+			{
+				// AAC uses MF_MT_AVG_BITRATE (bits per second)
+				hr = pOutputType->SetUINT32(MF_MT_AVG_BITRATE, bitRate);
+
+				// Set AAC payload type to ADTS (1) for better compatibility
+				// 0 = raw_data_block, 1 = ADTS (Audio Data Transport Stream)
+				if (SUCCEEDED(hr))
+				{
+					hr = pOutputType->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE, 1);
+				}
+
+				// Set AAC profile - 0x29 = AAC-LC Profile L2 (default)
+				if (SUCCEEDED(hr))
+				{
+					hr = pOutputType->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29);
+				}
+			}
+			else if (encoderName == AudioEncoder::flac)
+			{
+				// FLAC is lossless - no bitrate setting needed
+				// Quality is controlled by compression level (not exposed via MF)
+			}
+			else if (encoderName == AudioEncoder::opus)
+			{
+				// Opus uses average bytes per second
+				hr = pOutputType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bitRate / 8);
+			}
 		}
 
 		if (SUCCEEDED(hr))
