@@ -1,15 +1,27 @@
 #include "record_windows_plugin.h"
-#include <mfapi.h>
-#include <mfidl.h>
+#include <mfreadwrite.h>
 #include <Mferror.h>
 #include "record_config.h"
 #include <flutter/event_stream_handler_functions.h>
 #include <mutex>
-#include <functiondiscoverykeys_devpkey.h>
 
 using namespace flutter;
 
 namespace record_windows {
+	HRESULT AttributeGetString(IMFAttributes* pAttributes, const GUID& guid, LPWSTR value)
+	{
+		HRESULT hr = S_OK;
+		UINT32 cchLength = 0;
+
+		hr = pAttributes->GetStringLength(guid, &cchLength);
+		if (SUCCEEDED(hr))
+		{
+			hr = pAttributes->GetString(guid, value, cchLength + 1, &cchLength);
+		}
+
+		return hr;
+	}
+
 	static void ErrorFromHR(HRESULT hr, MethodResult<EncodableValue>& result)
 	{
 		_com_error err(hr);
@@ -372,71 +384,48 @@ namespace record_windows {
 	HRESULT RecordWindowsPlugin::ListInputDevices(MethodResult<EncodableValue>& result)
 	{
 		EncodableList devices;
-		HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-		if (FAILED(hr) && hr != RPC_E_CHANGED_MODE && hr != S_FALSE)
+
+		IMFAttributes* pDeviceAttributes = NULL;
+		IMFActivate** ppDevices = NULL;
+		UINT32 deviceCount = 0;
+
+		HRESULT hr = MFCreateAttributes(&pDeviceAttributes, 1);
+		if (SUCCEEDED(hr))
 		{
-			ErrorFromHR(hr, result);
-			return hr;
+			// Request audio capture devices
+			hr = pDeviceAttributes->SetGUID(
+				MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+				MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_AUDCAP_GUID);
 		}
-
-		IMMDeviceEnumerator* pEnumerator = nullptr;
-		IMMDeviceCollection* pCollection = nullptr;
-
-		hr = CoCreateInstance(
-			__uuidof(MMDeviceEnumerator),
-			nullptr,
-			CLSCTX_ALL,
-			__uuidof(IMMDeviceEnumerator),
-			(void**)&pEnumerator);
 
 		if (SUCCEEDED(hr))
 		{
-			hr = pEnumerator->EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE, &pCollection);
+			hr = MFEnumDeviceSources(pDeviceAttributes, &ppDevices, &deviceCount);
 		}
 
-		UINT deviceCount = 0;
-		if (SUCCEEDED(hr))
+		for (UINT32 i = 0; i < deviceCount; i++)
 		{
-			hr = pCollection->GetCount(&deviceCount);
-		}
+			LPWSTR friendlyName = NULL;
+			UINT32 friendlyNameLength = 0;
+			LPWSTR id;
+			UINT32 idLength = 0;
 
-		for (UINT i = 0; i < deviceCount && SUCCEEDED(hr); i++)
-		{
-			IMMDevice* pDevice = nullptr;
-			IPropertyStore* pProps = nullptr;
-			LPWSTR pwszID = nullptr;
-			PROPVARIANT varName;
-			PropVariantInit(&varName);
-
-			hr = pCollection->Item(i, &pDevice);
+			hr = ppDevices[i]->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_AUDCAP_ENDPOINT_ID, &id, &idLength);
 			if (SUCCEEDED(hr))
 			{
-				hr = pDevice->GetId(&pwszID);
-			}
-			if (SUCCEEDED(hr))
-			{
-				hr = pDevice->OpenPropertyStore(STGM_READ, &pProps);
-			}
-			if (SUCCEEDED(hr))
-			{
-				hr = pProps->GetValue(PKEY_Device_FriendlyName, &varName);
+				hr = ppDevices[i]->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &friendlyName, &friendlyNameLength);
 			}
 			if (SUCCEEDED(hr))
 			{
 				devices.push_back(EncodableMap({
-					{EncodableValue("id"), EncodableValue(toString(pwszID))},
-					{EncodableValue("label"), EncodableValue(toString(varName.pwszVal))}
-				}));
+				{EncodableValue("id"), EncodableValue(toString(id))},
+				{EncodableValue("label"), EncodableValue(toString(friendlyName))}
+					}));
+
+				CoTaskMemFree(id);
+				CoTaskMemFree(friendlyName);
 			}
-
-			PropVariantClear(&varName);
-			CoTaskMemFree(pwszID);
-			SafeRelease(pProps);
-			SafeRelease(pDevice);
 		}
-
-		SafeRelease(pCollection);
-		SafeRelease(pEnumerator);
 
 		if (SUCCEEDED(hr))
 		{
@@ -446,6 +435,13 @@ namespace record_windows {
 		{
 			ErrorFromHR(hr, result);
 		}
+
+		for (UINT32 i = 0; i < deviceCount; i++)
+		{
+			SafeRelease(ppDevices[i]);
+		}
+		SafeRelease(pDeviceAttributes);
+		CoTaskMemFree(ppDevices);
 
 		return hr;
 	}

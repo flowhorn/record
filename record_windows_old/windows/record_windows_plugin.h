@@ -1,6 +1,7 @@
 #ifndef FLUTTER_PLUGIN_RECORD_WINDOWS_PLUGIN_H_
 #define FLUTTER_PLUGIN_RECORD_WINDOWS_PLUGIN_H_
 
+
 #include <flutter/plugin_registrar_windows.h>
 #include <flutter/encodable_value.h>
 #include <flutter/event_channel.h>
@@ -12,7 +13,9 @@
 #include <mutex>
 
 #include <windows.h>
-#include <mmdeviceapi.h>
+#include <mfidl.h>
+#include <mfapi.h>
+#include <mferror.h>
 
 #include "utils.h"
 #include "record.h"

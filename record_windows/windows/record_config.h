@@ -7,24 +7,24 @@ namespace record_windows
 
 	struct AudioEncoder
 	{
-		const std::string aacLc = std::string("aacLc");
-		const std::string aacEld = std::string("aacEld");
-		const std::string aacHe = std::string("aacHe");
-		const std::string amrNb = std::string("amrNb");
-		const std::string amrWb = std::string("amrWb");
-		const std::string opus = std::string("opus");
-		const std::string flac = std::string("flac");
-		const std::string pcm16bits = std::string("pcm16bits");
-		const std::string wav = std::string("wav");
+		static constexpr const char* aacLc = "aacLc";
+		static constexpr const char* aacEld = "aacEld";
+		static constexpr const char* aacHe = "aacHe";
+		static constexpr const char* amrNb = "amrNb";
+		static constexpr const char* amrWb = "amrWb";
+		static constexpr const char* opus = "opus";
+		static constexpr const char* flac = "flac";
+		static constexpr const char* pcm16bits = "pcm16bits";
+		static constexpr const char* wav = "wav";
 	};
 
 	struct RecordConfig
 	{
-		std::string encoderName = AudioEncoder().aacLc;
-		std::string deviceId = NULL;
+		std::string encoderName = AudioEncoder::aacLc;
+		std::string deviceId;
 		int bitRate = 128000;
-		int sampleRate = 44100;
-		int numChannels = 2;
+		int sampleRate = 16000;  // Changed default to 16kHz for better voice quality
+		int numChannels = 1;     // Changed default to mono for voice
 		bool autoGain = false;
 		bool echoCancel = false;
 		bool noiseSuppress = false;
