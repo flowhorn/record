@@ -749,7 +749,7 @@ namespace record_windows
 		{
 			// Clamp to [-1.0, 1.0] and convert to 16-bit
 			float sample = pInput[i];
-			sample = std::max(-1.0f, std::min(1.0f, sample));
+			sample = (std::max)(-1.0f, (std::min)(1.0f, sample));
 			pOutput[i] = static_cast<int16_t>(sample * 32767.0f);
 		}
 	}
