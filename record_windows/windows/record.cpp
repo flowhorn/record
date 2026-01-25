@@ -491,6 +491,20 @@ namespace record_windows
 				{
 					hr = pOutputType->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29);
 				}
+
+				// Set block alignment for AAC
+				if (SUCCEEDED(hr))
+				{
+					UINT32 blockAlign = numChannels * 2; // 16 bits = 2 bytes per sample
+					hr = pOutputType->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, blockAlign);
+				}
+
+				// Set average bytes per second for AAC
+				if (SUCCEEDED(hr))
+				{
+					UINT32 bytesPerSec = bitRate / 8; // Convert bits per second to bytes per second
+					hr = pOutputType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bytesPerSec);
+				}
 			}
 			else if (encoderName == AudioEncoder::flac)
 			{
