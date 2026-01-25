@@ -653,7 +653,7 @@ namespace record_windows
 			// For silent buffers, write zeros
 			UINT32 numSamples = numFrames * m_pWaveFormat->nChannels;
 			m_conversionBuffer.resize(numSamples);
-			std::fill(m_conversionBuffer.begin(), m_conversionBuffer.end(), 0);
+			std::fill(m_conversionBuffer.begin(), m_conversionBuffer.end(), static_cast<int16_t>(0));
 		}
 		else
 		{
