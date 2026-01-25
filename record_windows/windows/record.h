@@ -1,5 +1,6 @@
 #pragma once
 
+#define NOMINMAX
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
@@ -138,4 +139,4 @@ namespace record_windows
 		// Main critical section for cleanup synchronization
 		CritSec m_critsec;
 	};
-};
+}
