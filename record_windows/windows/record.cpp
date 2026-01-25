@@ -457,11 +457,7 @@ namespace record_windows
 			}
 		}
 
-		// Set common audio attributes
-		if (SUCCEEDED(hr))
-		{
-			hr = pOutputType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-		}
+		// Set sample rate and channels (required for all formats)
 		if (SUCCEEDED(hr))
 		{
 			hr = pOutputType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, sampleRate);
@@ -476,7 +472,7 @@ namespace record_windows
 		{
 			if (isAacEncoder)
 			{
-				// AAC uses MF_MT_AVG_BITRATE (bits per second)
+				// AAC requires MF_MT_AVG_BITRATE (bits per second)
 				hr = pOutputType->SetUINT32(MF_MT_AVG_BITRATE, bitRate);
 
 				// Set AAC payload type to ADTS (1) for better compatibility
@@ -491,30 +487,16 @@ namespace record_windows
 				{
 					hr = pOutputType->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29);
 				}
-
-				// Set block alignment for AAC
-				if (SUCCEEDED(hr))
-				{
-					UINT32 blockAlign = numChannels * 2; // 16 bits = 2 bytes per sample
-					hr = pOutputType->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, blockAlign);
-				}
-
-				// Set average bytes per second for AAC
-				if (SUCCEEDED(hr))
-				{
-					UINT32 bytesPerSec = bitRate / 8; // Convert bits per second to bytes per second
-					hr = pOutputType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bytesPerSec);
-				}
 			}
 			else if (encoderName == AudioEncoder::flac)
 			{
-				// FLAC is lossless - no bitrate setting needed
-				// Quality is controlled by compression level (not exposed via MF)
+				// FLAC requires bits per sample
+				hr = pOutputType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
 			}
 			else if (encoderName == AudioEncoder::opus)
 			{
-				// Opus uses average bytes per second
-				hr = pOutputType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bitRate / 8);
+				// Opus requires average bitrate
+				hr = pOutputType->SetUINT32(MF_MT_AVG_BITRATE, bitRate);
 			}
 		}
 
