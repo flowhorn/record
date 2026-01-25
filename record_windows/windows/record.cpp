@@ -102,6 +102,10 @@ namespace record_windows
 		hr = InitializeEncoder(path);
 		if (FAILED(hr))
 		{
+			char errorMsg[512];
+			_com_error err(hr);
+			sprintf_s(errorMsg, "InitializeEncoder failed: HRESULT=0x%08X, %S", hr, err.ErrorMessage());
+			OutputDebugStringA(errorMsg);
 			EndRecording();
 			return hr;
 		}
@@ -508,6 +512,12 @@ namespace record_windows
 		if (SUCCEEDED(hr))
 		{
 			hr = m_pSinkWriter->AddStream(pOutputType, &m_dwStreamIndex);
+			if (FAILED(hr))
+			{
+				char errorMsg[256];
+				sprintf_s(errorMsg, "AddStream failed: HRESULT=0x%08X", hr);
+				OutputDebugStringA(errorMsg);
+			}
 		}
 
 		// Create input media type (PCM - we convert WASAPI float to PCM16)
@@ -553,12 +563,36 @@ namespace record_windows
 		// Set input type - this may insert a resampler if input/output rates differ
 		if (SUCCEEDED(hr))
 		{
+			if (m_pWaveFormat)
+			{
+				char debugMsg[512];
+				sprintf_s(debugMsg, "Setting input type: %dHz, %d channels, 16-bit PCM -> Output: %dHz, %d channels, %s",
+					m_pWaveFormat->nSamplesPerSec, m_pWaveFormat->nChannels,
+					sampleRate, numChannels, encoderName.c_str());
+				OutputDebugStringA(debugMsg);
+			}
 			hr = m_pSinkWriter->SetInputMediaType(m_dwStreamIndex, pInputType, nullptr);
+			if (FAILED(hr))
+			{
+				char errorMsg[256];
+				sprintf_s(errorMsg, "SetInputMediaType failed: HRESULT=0x%08X", hr);
+				OutputDebugStringA(errorMsg);
+			}
 		}
 
 		if (SUCCEEDED(hr))
 		{
 			hr = m_pSinkWriter->BeginWriting();
+			if (FAILED(hr))
+			{
+				char errorMsg[256];
+				sprintf_s(errorMsg, "BeginWriting failed: HRESULT=0x%08X", hr);
+				OutputDebugStringA(errorMsg);
+			}
+			else
+			{
+				OutputDebugStringA("Media Foundation encoder initialized successfully");
+			}
 		}
 
 		SafeRelease(&pOutputType);
