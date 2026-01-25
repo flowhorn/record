@@ -378,13 +378,18 @@ namespace record_windows
 		if (FAILED(hr)) return hr;
 		m_bMfStarted = true;
 
-		// Create sink writer with low-latency attributes
+		// Create sink writer with attributes for resampling and format conversion
 		IMFAttributes* pAttributes = nullptr;
-		hr = MFCreateAttributes(&pAttributes, 1);
+		hr = MFCreateAttributes(&pAttributes, 2);
 		if (SUCCEEDED(hr))
 		{
 			// Enable low-latency mode for real-time encoding
 			hr = pAttributes->SetUINT32(MF_LOW_LATENCY, TRUE);
+		}
+		if (SUCCEEDED(hr))
+		{
+			// Enable automatic format conversion (resampling, channel mixing, etc.)
+			hr = pAttributes->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
 		}
 
 		if (SUCCEEDED(hr))
@@ -506,6 +511,7 @@ namespace record_windows
 		}
 
 		// Create input media type (PCM - we convert WASAPI float to PCM16)
+		// The input describes the actual data we're feeding (WASAPI device format converted to PCM16)
 		IMFMediaType* pInputType = nullptr;
 		if (SUCCEEDED(hr))
 		{
@@ -525,10 +531,12 @@ namespace record_windows
 		}
 		if (SUCCEEDED(hr) && m_pWaveFormat)
 		{
+			// Use WASAPI device's sample rate for input (actual captured data rate)
 			hr = pInputType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, m_pWaveFormat->nSamplesPerSec);
 		}
 		if (SUCCEEDED(hr) && m_pWaveFormat)
 		{
+			// Use WASAPI device's channel count for input (actual captured data)
 			hr = pInputType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, m_pWaveFormat->nChannels);
 		}
 		if (SUCCEEDED(hr) && m_pWaveFormat)
@@ -542,6 +550,7 @@ namespace record_windows
 			hr = pInputType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bytesPerSec);
 		}
 
+		// Set input type - this may insert a resampler if input/output rates differ
 		if (SUCCEEDED(hr))
 		{
 			hr = m_pSinkWriter->SetInputMediaType(m_dwStreamIndex, pInputType, nullptr);
