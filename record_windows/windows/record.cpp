@@ -4,6 +4,8 @@
 // Miniaudio implementation (macros defined in CMakeLists.txt)
 #include "miniaudio.h"
 
+#include <iostream>
+
 namespace record_windows {
 
 // Ring buffer size: 100ms of audio at 48kHz mono (16-bit samples)
@@ -220,14 +222,21 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
             if (ma_context_get_devices(&m_context, &pPlaybackDeviceInfos, &playbackDeviceCount, &pCaptureDeviceInfos, &captureDeviceCount) == MA_SUCCESS) {
                 if (deviceIndex >= 0 && deviceIndex < (int)captureDeviceCount) {
                     deviceConfig.capture.pDeviceID = &pCaptureDeviceInfos[deviceIndex].id;
+                    std::cout << "Record: Selected device index " << deviceIndex << ": " << pCaptureDeviceInfos[deviceIndex].name << std::endl;
+                } else {
+                    std::cerr << "Record: Device index " << deviceIndex << " out of range (count=" << captureDeviceCount << ")" << std::endl;
                 }
+            } else {
+                std::cerr << "Record: Failed to list devices" << std::endl;
             }
         } catch (...) {
-            // Ignore parsing errors and use default device
+            std::cerr << "Record: Exception parsing deviceId" << std::endl;
         }
     }
 
-    if (ma_device_init(&m_context, &deviceConfig, &m_device) != MA_SUCCESS) {
+    ma_result initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
+    if (initResult != MA_SUCCESS) {
+        std::cerr << "Record: Failed to initialize device. Result=" << initResult << " (" << ma_result_description(initResult) << ")" << std::endl;
         return E_FAIL;
     }
     m_deviceInitialized = true;
