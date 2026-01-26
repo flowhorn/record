@@ -23,14 +23,8 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(xiph_libs)
 
-# Debug: print the source directory
-message(STATUS "Xiph libs source dir: ${xiph_libs_SOURCE_DIR}")
-
-# The prebuilt package structure:
-# - include/ogg/*.h
-# - include/opus/*.h  
-# - lib/libogg.lib
-# - lib/opus.lib
+# Prebuilt package provides .lib files only
+# Headers are bundled in include/opus/ and include/ogg/
 
 # Create imported targets for opus and ogg
 add_library(ogg STATIC IMPORTED GLOBAL)
@@ -102,7 +96,6 @@ target_include_directories(${PLUGIN_NAME} INTERFACE
 target_include_directories(${PLUGIN_NAME} PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/encoder"
-  "${xiph_libs_SOURCE_DIR}/include"
 )
 
 target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin ogg opus)
