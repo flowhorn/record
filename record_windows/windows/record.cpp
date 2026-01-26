@@ -314,6 +314,64 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
         }
     }
 
+    if (hasSelectedDevice) {
+        ma_device_info deviceInfo;
+        if (ma_context_get_device_info(&m_context, ma_device_type_capture, &selectedDeviceID, &deviceInfo) == MA_SUCCESS) {
+            if (deviceInfo.nativeDataFormatCount == 0) {
+                std::cerr << "Record: Selected device has no native format info; will try requested format." << std::endl;
+            } else {
+                std::cout << "Record: Selected device reports " << deviceInfo.nativeDataFormatCount << " native formats." << std::endl;
+            }
+
+            if (m_pConfig && m_pConfig->encoderName == AudioEncoder().aacLc) {
+                auto supportsRate = [&](ma_uint32 rate) -> bool {
+                    for (ma_uint32 i = 0; i < deviceInfo.nativeDataFormatCount; ++i) {
+                        auto fmt = deviceInfo.nativeDataFormats[i];
+                        if (fmt.format != ma_format_s16 && fmt.format != ma_format_f32 && fmt.format != ma_format_s32 && fmt.format != ma_format_u8) {
+                            continue;
+                        }
+                        if (fmt.sampleRate == 0 || fmt.sampleRate == rate) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+
+                if (!supportsRate(48000) && supportsRate(44100)) {
+                    std::cout << "Record: Selected device does not advertise 48k. Falling back to 44.1k for AAC." << std::endl;
+                    m_pConfig->sampleRate = 44100;
+                } else if (supportsRate(48000)) {
+                    m_pConfig->sampleRate = 48000;
+                }
+
+                auto supportsChannels = [&](ma_uint32 channels) -> bool {
+                    for (ma_uint32 i = 0; i < deviceInfo.nativeDataFormatCount; ++i) {
+                        auto fmt = deviceInfo.nativeDataFormats[i];
+                        if (fmt.format != ma_format_s16 && fmt.format != ma_format_f32 && fmt.format != ma_format_s32 && fmt.format != ma_format_u8) {
+                            continue;
+                        }
+                        if (fmt.channels == 0 || fmt.channels == channels) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+
+                if (!supportsChannels((ma_uint32)m_pConfig->numChannels)) {
+                    if (supportsChannels(1)) {
+                        std::cout << "Record: Selected device does not advertise " << m_pConfig->numChannels << " channels. Falling back to mono for AAC." << std::endl;
+                        m_pConfig->numChannels = 1;
+                    } else if (supportsChannels(2)) {
+                        std::cout << "Record: Selected device does not advertise " << m_pConfig->numChannels << " channels. Falling back to stereo for AAC." << std::endl;
+                        m_pConfig->numChannels = 2;
+                    }
+                }
+            }
+        } else {
+            std::cerr << "Record: Failed to query selected device native formats." << std::endl;
+        }
+    }
+
     // Attempt 1: Strict Low Latency
     if (!reuseDevice) {
         ma_device_config deviceConfig = ma_device_config_init(ma_device_type_capture);
