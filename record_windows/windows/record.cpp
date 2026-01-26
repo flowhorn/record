@@ -306,6 +306,10 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
     // Capture Device ID negotiation
     ma_device_id selectedDeviceID;
     bool hasSelectedDevice = false;
+    if (m_pConfig) {
+        std::cout << "Record: Requested deviceId='" << m_pConfig->deviceId << "', rate=" << m_pConfig->sampleRate
+                  << ", channels=" << m_pConfig->numChannels << std::endl;
+    }
     
     if (!reuseDevice) {
         // Resolve device ID if requested
@@ -505,6 +509,33 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
                     deviceConfig.pUserData = this;
                     deviceConfig.performanceProfile = ma_performance_profile_conservative;
                     deviceConfig.capture.pDeviceID = &selectedDeviceID;
+
+                    initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
+                    if (initResult == MA_SUCCESS) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (initResult != MA_SUCCESS && !hasSelectedDevice) {
+            ma_device_info deviceInfo;
+            if (ma_context_get_device_info(&m_context, ma_device_type_capture, NULL, &deviceInfo) == MA_SUCCESS) {
+                std::cerr << "Record: Probing supported formats for default device..." << std::endl;
+                for (ma_uint32 i = 0; i < deviceInfo.nativeDataFormatCount; ++i) {
+                    auto fmt = deviceInfo.nativeDataFormats[i];
+                    if (fmt.format != ma_format_s16 && fmt.format != ma_format_f32 && fmt.format != ma_format_s32 && fmt.format != ma_format_u8) {
+                        continue;
+                    }
+
+                    deviceConfig = ma_device_config_init(ma_device_type_capture);
+                    deviceConfig.capture.format = fmt.format;
+                    deviceConfig.capture.channels = (fmt.channels > 0) ? fmt.channels : 0;
+                    deviceConfig.sampleRate = (fmt.sampleRate > 0) ? fmt.sampleRate : 0;
+                    deviceConfig.dataCallback = AudioDataCallback;
+                    deviceConfig.pUserData = this;
+                    deviceConfig.performanceProfile = ma_performance_profile_conservative;
+                    deviceConfig.capture.pDeviceID = NULL;
 
                     initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
                     if (initResult == MA_SUCCESS) {
