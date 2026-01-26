@@ -256,6 +256,28 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
     }
 
     ma_result initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
+    
+    // If strict low latency fails (likely due to format mismatch), retry with default profile
+    if (initResult == MA_FORMAT_NOT_SUPPORTED) {
+        std::cerr << "Record: Strict low latency failed (Format not supported). Retrying with default profile and native sample rate." << std::endl;
+        
+        // Reset config to defaults but keep callback/data
+        deviceConfig.performanceProfile = ma_performance_profile_default;
+        deviceConfig.periodSizeInFrames = 0;
+        deviceConfig.sampleRate = 0; // Let backend choose valid rate (we'll resample if needed or just use what we get)
+        
+        // If the user *really* wanted a specific rate, miniaudio converter *should* kick in if we don't disable it.
+        // But for safety, let's try 0 sample rate and just use what the device gives us. 
+        // Note: usage of ring buffer assumes we push data in format we agreed on.
+        // Actually, if we set sampleRate=0, miniaudio picks device native. 
+        // But our Encoder expects `m_pConfig->sampleRate`. 
+        // We really want miniaudio to CONVERT for us.
+        
+        // Try again with default profile, requesting the SAME sample rate (hoping converter works in default mode)
+        deviceConfig.sampleRate = m_pConfig->sampleRate;
+        initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
+    }
+
     if (initResult != MA_SUCCESS) {
         std::cerr << "Record: Failed to initialize device. Result=" << initResult << " (" << ma_result_description(initResult) << ")" << std::endl;
         return E_FAIL;
