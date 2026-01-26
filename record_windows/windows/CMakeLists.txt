@@ -79,6 +79,7 @@ target_compile_definitions(${PLUGIN_NAME} PRIVATE
   MA_NO_ENGINE
   MA_NO_NODE_GRAPH
   MA_NO_RESOURCE_MANAGER
+  NOMINMAX  # Prevent Windows.h from defining min/max macros
 )
 
 # Apply a standard set of build settings that are configured in the
@@ -100,6 +101,7 @@ target_include_directories(${PLUGIN_NAME} INTERFACE
 )
 target_include_directories(${PLUGIN_NAME} PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/encoder"
   "${xiph_libs_SOURCE_DIR}/include"
 )
 
