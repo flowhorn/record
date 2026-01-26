@@ -119,6 +119,11 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
         if (FAILED(hr)) std::cerr << "SetUINT32 Channels In failed: " << hr << std::endl;
     }
 
+    if (SUCCEEDED(hr)) {
+        hr = pMediaTypeIn->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
+        if (FAILED(hr)) std::cerr << "SetUINT32 AllSamplesIndependent In failed: " << hr << std::endl;
+    }
+
     // PCM requires Block Alignment and Avg Bytes/Sec for strict definition
     if (SUCCEEDED(hr)) {
         UINT32 blockAlign = m_channels * 2; // 16 bits = 2 bytes
