@@ -3,7 +3,7 @@
 #include <string>
 #include <cstdint>
 #include <vector>
-#include <opus.h>
+#include <opus/opus.h>
 #include <ogg/ogg.h>
 #include <fstream>
 

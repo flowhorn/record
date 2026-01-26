@@ -12,85 +12,31 @@ project(${PROJECT_NAME} LANGUAGES CXX C)
 # not be changed
 set(PLUGIN_NAME "record_windows_plugin")
 
-# Download and extract prebuilt opus and ogg libraries
+# Download prebuilt opus/ogg libraries from TeamPyOgg
 include(FetchContent)
 
-# Use prebuilt binaries from xiph.org
-set(OPUS_VERSION "1.4")
-set(OGG_VERSION "1.3.6")
-
-# Download opus source
 FetchContent_Declare(
-  opus_src
-  URL https://downloads.xiph.org/releases/opus/opus-${OPUS_VERSION}.tar.gz
+  xiph_libs
+  URL https://github.com/TeamPyOgg/VS-XiphAudioBuild/releases/download/2020.09.19/x64-ReleaseStatic.zip
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 
-# Download ogg source (using zip for Windows compatibility)
-FetchContent_Declare(
-  ogg_src
-  URL https://downloads.xiph.org/releases/ogg/libogg-${OGG_VERSION}.zip
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-)
-
-FetchContent_GetProperties(opus_src)
-if(NOT opus_src_POPULATED)
-  FetchContent_Populate(opus_src)
+FetchContent_GetProperties(xiph_libs)
+if(NOT xiph_libs_POPULATED)
+  FetchContent_Populate(xiph_libs)
 endif()
 
-FetchContent_GetProperties(ogg_src)
-if(NOT ogg_src_POPULATED)
-  FetchContent_Populate(ogg_src)
-endif()
-
-# Build ogg as a static library from source files
-set(OGG_SOURCES
-  ${ogg_src_SOURCE_DIR}/src/framing.c
-  ${ogg_src_SOURCE_DIR}/src/bitwise.c
+# Create imported targets for opus and ogg
+add_library(ogg STATIC IMPORTED GLOBAL)
+set_target_properties(ogg PROPERTIES
+  IMPORTED_LOCATION "${xiph_libs_SOURCE_DIR}/lib/libogg.lib"
+  INTERFACE_INCLUDE_DIRECTORIES "${xiph_libs_SOURCE_DIR}/include"
 )
 
-add_library(ogg_static STATIC ${OGG_SOURCES})
-target_include_directories(ogg_static PUBLIC 
-  ${ogg_src_SOURCE_DIR}/include
-  ${CMAKE_CURRENT_SOURCE_DIR}/include/ogg  # For config_types.h
-)
-
-# Build opus as a static library from source files (CELT + SILK)
-file(GLOB OPUS_CELT_SOURCES ${opus_src_SOURCE_DIR}/celt/*.c)
-file(GLOB OPUS_SILK_SOURCES ${opus_src_SOURCE_DIR}/silk/*.c)
-file(GLOB OPUS_SILK_FIXED_SOURCES ${opus_src_SOURCE_DIR}/silk/fixed/*.c)
-file(GLOB OPUS_SRC_SOURCES ${opus_src_SOURCE_DIR}/src/*.c)
-
-# Remove demo/test files
-list(FILTER OPUS_SRC_SOURCES EXCLUDE REGEX ".*demo.*")
-list(FILTER OPUS_SRC_SOURCES EXCLUDE REGEX ".*test.*")
-list(FILTER OPUS_CELT_SOURCES EXCLUDE REGEX ".*demo.*")
-list(FILTER OPUS_CELT_SOURCES EXCLUDE REGEX ".*test.*")
-
-add_library(opus_static STATIC 
-  ${OPUS_CELT_SOURCES}
-  ${OPUS_SILK_SOURCES}
-  ${OPUS_SILK_FIXED_SOURCES}
-  ${OPUS_SRC_SOURCES}
-)
-
-target_include_directories(opus_static PUBLIC 
-  ${opus_src_SOURCE_DIR}/include
-)
-target_include_directories(opus_static PRIVATE
-  ${opus_src_SOURCE_DIR}
-  ${opus_src_SOURCE_DIR}/celt
-  ${opus_src_SOURCE_DIR}/silk
-  ${opus_src_SOURCE_DIR}/silk/fixed
-  ${ogg_src_SOURCE_DIR}/include
-)
-
-target_compile_definitions(opus_static PRIVATE
-  OPUS_BUILD
-  USE_ALLOCA
-  HAVE_LRINT
-  HAVE_LRINTF
-  FIXED_POINT
+add_library(opus STATIC IMPORTED GLOBAL)
+set_target_properties(opus PROPERTIES
+  IMPORTED_LOCATION "${xiph_libs_SOURCE_DIR}/lib/opus.lib"
+  INTERFACE_INCLUDE_DIRECTORIES "${xiph_libs_SOURCE_DIR}/include"
 )
 
 # Any new source files that you add to the plugin should be added here.
@@ -145,12 +91,10 @@ target_include_directories(${PLUGIN_NAME} INTERFACE
 )
 target_include_directories(${PLUGIN_NAME} PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
-  ${ogg_src_SOURCE_DIR}/include
-  ${opus_src_SOURCE_DIR}/include
-  "${CMAKE_CURRENT_SOURCE_DIR}/include/ogg"
+  "${xiph_libs_SOURCE_DIR}/include"
 )
 
-target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin ogg_static opus_static)
+target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin ogg opus)
 
 # List of absolute paths to libraries that should be bundled with the plugin.
 # This list could contain prebuilt libraries, or libraries created by an
