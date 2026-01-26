@@ -1,14 +1,7 @@
 #include "record.h"
 #include "record_windows_plugin.h"
 
-// Miniaudio implementation
-#define MINIAUDIO_IMPLEMENTATION
-#define MA_NO_DECODING
-#define MA_NO_ENCODING
-#define MA_NO_GENERATION
-#define MA_NO_ENGINE
-#define MA_NO_NODE_GRAPH
-#define MA_NO_RESOURCE_MANAGER
+// Miniaudio implementation (macros defined in CMakeLists.txt)
 #include "miniaudio.h"
 
 namespace record_windows {
@@ -189,7 +182,7 @@ HRESULT Recorder::StartStream(std::unique_ptr<RecordConfig> config) {
 }
 
 HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
-    HRESULT hr = EndRecording();
+    EndRecording();
 
     m_pConfig = std::move(config);
     m_dataWritten = 0;
