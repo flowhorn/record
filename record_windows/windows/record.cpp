@@ -130,7 +130,7 @@ void Recorder::EncoderThreadFunc() {
     const bool allowPartialFrames = !isEncoded; // raw PCM/WAV/stream can use partial frames
     std::vector<int16_t> frameBuffer(frameSize * m_pConfig->numChannels);
 
-    while (m_encoderRunning.load(std::memory_order_relaxed)) {
+    while (m_encoderRunning.load(std::memory_order_relaxed) || m_stopRequested.load(std::memory_order_relaxed)) {
         size_t available = m_ringBuffer ? m_ringBuffer->Available() : 0;
         size_t targetBytes = 0;
 
@@ -141,10 +141,17 @@ void Recorder::EncoderThreadFunc() {
             targetBytes = bytesPerFrame;
         }
 
+        if (!allowPartialFrames && targetBytes == 0 && m_stopRequested.load(std::memory_order_relaxed) && available > 0) {
+            size_t aligned = (available / bytesPerSampleFrame) * bytesPerSampleFrame;
+            if (aligned > 0) {
+                targetBytes = aligned;
+            }
+        }
+
         if (targetBytes == 0) {
             std::unique_lock<std::mutex> lock(m_dataMutex);
             m_dataCondition.wait_for(lock, std::chrono::milliseconds(10), [&]() {
-                if (!m_encoderRunning.load(std::memory_order_relaxed)) {
+                if (!m_encoderRunning.load(std::memory_order_relaxed) && !m_stopRequested.load(std::memory_order_relaxed)) {
                     return true;
                 }
                 if (!m_ringBuffer) {
@@ -152,6 +159,9 @@ void Recorder::EncoderThreadFunc() {
                 }
                 size_t avail = m_ringBuffer->Available();
                 if (allowPartialFrames) {
+                    return avail >= bytesPerSampleFrame;
+                }
+                if (m_stopRequested.load(std::memory_order_relaxed)) {
                     return avail >= bytesPerSampleFrame;
                 }
                 return avail >= bytesPerFrame;
@@ -172,11 +182,19 @@ void Recorder::EncoderThreadFunc() {
             if (framesRead == frameSize) {
                 m_opusEncoder->EncodeFrame(frameBuffer.data(), frameSize);
                 m_dataWritten += bytesRead;
+            } else if (m_stopRequested.load(std::memory_order_relaxed) && framesRead > 0) {
+                std::fill(frameBuffer.begin() + framesRead * m_pConfig->numChannels, frameBuffer.end(), 0);
+                m_opusEncoder->EncodeFrame(frameBuffer.data(), frameSize);
+                m_dataWritten += bytesRead;
             }
         }
         else if (m_aacEncoder) {
             // AAC file output
             if (framesRead == frameSize) {
+                m_aacEncoder->EncodeFrame(frameBuffer.data(), frameSize);
+                m_dataWritten += bytesRead;
+            } else if (m_stopRequested.load(std::memory_order_relaxed) && framesRead > 0) {
+                std::fill(frameBuffer.begin() + framesRead * m_pConfig->numChannels, frameBuffer.end(), 0);
                 m_aacEncoder->EncodeFrame(frameBuffer.data(), frameSize);
                 m_dataWritten += bytesRead;
             }
@@ -198,6 +216,10 @@ void Recorder::EncoderThreadFunc() {
             });
             m_dataWritten += bytesRead;
         }
+
+        if (m_stopRequested.load(std::memory_order_relaxed) && m_ringBuffer && m_ringBuffer->Available() == 0) {
+            break;
+        }
     }
 }
 
@@ -211,6 +233,7 @@ HRESULT Recorder::Start(std::unique_ptr<RecordConfig> config, std::wstring path)
 
     m_recordingPath = path;
     hr = InitRecording(std::move(config));
+    m_stopRequested = false;
 
     if (SUCCEEDED(hr)) {
         // Set up output based on encoder
@@ -272,6 +295,7 @@ HRESULT Recorder::StartStream(std::unique_ptr<RecordConfig> config) {
     }
 
     HRESULT hr = InitRecording(std::move(config));
+    m_stopRequested = false;
 
     if (SUCCEEDED(hr)) {
         // Start miniaudio device
@@ -762,20 +786,21 @@ bool Recorder::IsRecording() {
 HRESULT Recorder::EndRecording() {
     AutoLock lock(m_critsec);
 
-    // Stop encoder thread
-    if (m_encoderRunning) {
-        m_encoderRunning = false;
-        m_dataCondition.notify_all();
-        if (m_encoderThread.joinable()) {
-            m_encoderThread.join();
-        }
-    }
-
     // Stop miniaudio device (but don't uninit yet, to allow reuse)
     if (m_deviceInitialized) {
         ma_device_stop(&m_device);
         // ma_device_uninit(&m_device); -> Moved to UninitDevice()
         // m_deviceInitialized = false;
+    }
+
+    // Drain and stop encoder thread
+    if (m_encoderRunning) {
+        m_stopRequested = true;
+        m_encoderRunning = false;
+        m_dataCondition.notify_all();
+        if (m_encoderThread.joinable()) {
+            m_encoderThread.join();
+        }
     }
 
     // Finalize Opus encoder
@@ -838,6 +863,7 @@ HRESULT Recorder::EndRecording() {
     m_amplitude = -160.0;
     m_maxAmplitude = -160.0;
     m_isPaused = false;
+    m_stopRequested = false;
     m_pConfig.reset();
     m_recordingPath.clear();
 

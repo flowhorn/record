@@ -69,6 +69,7 @@ private:
     int m_channels = 1;
     int m_bitrate = 24000;
     int m_frameSize = 960;  // 20ms at 48kHz
+    int m_preSkip = 0;
     
     int64_t m_granulePos = 0;
     int m_packetNo = 0;

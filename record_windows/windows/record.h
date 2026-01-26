@@ -99,6 +99,7 @@ namespace record_windows {
         std::unique_ptr<AacEncoder> m_aacEncoder;
         std::thread m_encoderThread;
         std::atomic<bool> m_encoderRunning{false};
+        std::atomic<bool> m_stopRequested{false};
         std::mutex m_dataMutex;
         std::condition_variable m_dataCondition;
 
