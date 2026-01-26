@@ -275,7 +275,8 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
         // We really want miniaudio to CONVERT for us.
         
         // Try again with default profile, requesting the SAME sample rate (hoping converter works in default mode)
-        deviceConfig.sampleRate = m_pConfig->sampleRate;
+        // Try again with default profile, allowing native rate
+        deviceConfig.sampleRate = 0; 
         initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
     }
 
@@ -284,6 +285,16 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
         return E_FAIL;
     }
     m_deviceInitialized = true;
+    
+    // Update config with actual sample rate/channels chosen by miniaudio
+    // This ensures encoders use the correct rate (e.g. if device is 48k but we asked for 44.1k and got 48k)
+    // Note: If miniaudio is converting, m_device.sampleRate might be the *device* rate or *internal* rate.
+    // Ideally we want the rate we are receiving in the callback.
+    // Since we set sampleRate=0 in retry, we are getting native rate.
+    if (m_pConfig->sampleRate != m_device.sampleRate) {
+        std::cout << "Record: Sample rate corrected from " << m_pConfig->sampleRate << " to " << m_device.sampleRate << std::endl;
+        m_pConfig->sampleRate = m_device.sampleRate;
+    }
 
     // Create ring buffer
     m_ringBuffer = std::make_unique<RingBuffer>(RING_BUFFER_SIZE);
