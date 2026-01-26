@@ -29,12 +29,12 @@ FetchContent_MakeAvailable(xiph_libs)
 # Create imported targets for opus and ogg
 add_library(ogg STATIC IMPORTED GLOBAL)
 set_target_properties(ogg PROPERTIES
-  IMPORTED_LOCATION "${xiph_libs_SOURCE_DIR}/lib/libogg.lib"
+  IMPORTED_LOCATION "${xiph_libs_SOURCE_DIR}/ogg.lib"
 )
 
 add_library(opus STATIC IMPORTED GLOBAL)
 set_target_properties(opus PROPERTIES
-  IMPORTED_LOCATION "${xiph_libs_SOURCE_DIR}/lib/opus.lib"
+  IMPORTED_LOCATION "${xiph_libs_SOURCE_DIR}/opus.lib"
 )
 # opus depends on ogg
 set_target_properties(opus PROPERTIES
