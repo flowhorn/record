@@ -160,6 +160,7 @@ HRESULT Recorder::Start(std::unique_ptr<RecordConfig> config, std::wstring path)
         // Start miniaudio device
         if (ma_device_start(&m_device) != MA_SUCCESS) {
             EndRecording();
+            UninitDevice();
             return E_FAIL;
         }
 
@@ -184,6 +185,7 @@ HRESULT Recorder::StartStream(std::unique_ptr<RecordConfig> config) {
         // Start miniaudio device
         if (ma_device_start(&m_device) != MA_SUCCESS) {
             EndRecording();
+            UninitDevice();
             return E_FAIL;
         }
 
@@ -214,97 +216,121 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
         m_contextInitialized = true;
     }
 
+    // Check if we can reuse the existing initialized device
+    bool reuseDevice = false;
+    if (m_deviceInitialized) {
+        if (m_lastDeviceId == m_pConfig->deviceId &&
+            m_lastNumChannels == m_pConfig->numChannels &&
+            m_lastSampleRate == m_pConfig->sampleRate) {
+            reuseDevice = true;
+        }
+    }
+
+    if (!reuseDevice) {
+        UninitDevice();
+    }
+
     // Capture Device ID negotiation
     ma_device_id selectedDeviceID;
     bool hasSelectedDevice = false;
-
-    // Resolve device ID if requested
-    if (!m_pConfig->deviceId.empty()) {
-        try {
-            int deviceIndex = std::stoi(m_pConfig->deviceId);
-            
-            ma_device_info* pPlaybackDeviceInfos;
-            ma_uint32 playbackDeviceCount;
-            ma_device_info* pCaptureDeviceInfos;
-            ma_uint32 captureDeviceCount;
-            
-            if (ma_context_get_devices(&m_context, &pPlaybackDeviceInfos, &playbackDeviceCount, &pCaptureDeviceInfos, &captureDeviceCount) == MA_SUCCESS) {
-                if (deviceIndex >= 0 && deviceIndex < (int)captureDeviceCount) {
-                    selectedDeviceID = pCaptureDeviceInfos[deviceIndex].id;
-                    hasSelectedDevice = true;
-                    std::cout << "Record: Resolved device index " << deviceIndex << " to ID." << std::endl;
+    
+    if (!reuseDevice) {
+        // Resolve device ID if requested
+        if (!m_pConfig->deviceId.empty()) {
+            try {
+                int deviceIndex = std::stoi(m_pConfig->deviceId);
+                
+                ma_device_info* pPlaybackDeviceInfos;
+                ma_uint32 playbackDeviceCount;
+                ma_device_info* pCaptureDeviceInfos;
+                ma_uint32 captureDeviceCount;
+                
+                if (ma_context_get_devices(&m_context, &pPlaybackDeviceInfos, &playbackDeviceCount, &pCaptureDeviceInfos, &captureDeviceCount) == MA_SUCCESS) {
+                    if (deviceIndex >= 0 && deviceIndex < (int)captureDeviceCount) {
+                        selectedDeviceID = pCaptureDeviceInfos[deviceIndex].id;
+                        hasSelectedDevice = true;
+                        std::cout << "Record: Resolved device index " << deviceIndex << " to ID." << std::endl;
+                    } else {
+                        std::cerr << "Record: Device index " << deviceIndex << " out of range (count=" << captureDeviceCount << ")" << std::endl;
+                    }
                 } else {
-                    std::cerr << "Record: Device index " << deviceIndex << " out of range (count=" << captureDeviceCount << ")" << std::endl;
+                    std::cerr << "Record: Failed to list devices" << std::endl;
                 }
-            } else {
-                std::cerr << "Record: Failed to list devices" << std::endl;
+            } catch (...) {
+                std::cerr << "Record: Exception parsing deviceId" << std::endl;
             }
-        } catch (...) {
-            std::cerr << "Record: Exception parsing deviceId" << std::endl;
         }
     }
 
     // Attempt 1: Strict Low Latency
-    ma_device_config deviceConfig = ma_device_config_init(ma_device_type_capture);
-    deviceConfig.capture.format = ma_format_s16;
-    deviceConfig.capture.channels = m_pConfig->numChannels;
-    deviceConfig.sampleRate = m_pConfig->sampleRate;
-    deviceConfig.dataCallback = AudioDataCallback;
-    deviceConfig.pUserData = this;
-    deviceConfig.performanceProfile = ma_performance_profile_low_latency;
-    deviceConfig.periodSizeInFrames = 0; 
-    deviceConfig.wasapi.noHardwareOffloading = MA_TRUE; 
-    
-    if (hasSelectedDevice) {
-        deviceConfig.capture.pDeviceID = &selectedDeviceID;
-    }
-
-    ma_result initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
-    
-    // Attempt 2: Compatibility Fallback
-    if (initResult != MA_SUCCESS) {
-        std::cerr << "Record: Strict init failed (" << initResult << "). Retrying with compatibility defaults." << std::endl;
-        
-        // Clean reset of config
-        deviceConfig = ma_device_config_init(ma_device_type_capture);
-        deviceConfig.capture.format = ma_format_s16; // We need S16 for our callback logic
-        deviceConfig.capture.channels = 0; // Allow native channels (will update config later)
-        deviceConfig.sampleRate = 0;       // Allow native rate (will update config later)
+    if (!reuseDevice) {
+        ma_device_config deviceConfig = ma_device_config_init(ma_device_type_capture);
+        deviceConfig.capture.format = ma_format_s16;
+        deviceConfig.capture.channels = m_pConfig->numChannels;
+        deviceConfig.sampleRate = m_pConfig->sampleRate;
         deviceConfig.dataCallback = AudioDataCallback;
         deviceConfig.pUserData = this;
-        deviceConfig.performanceProfile = ma_performance_profile_conservative;
+        deviceConfig.performanceProfile = ma_performance_profile_low_latency;
+        deviceConfig.periodSizeInFrames = 0; 
+        deviceConfig.wasapi.noHardwareOffloading = MA_TRUE; 
         
         if (hasSelectedDevice) {
             deviceConfig.capture.pDeviceID = &selectedDeviceID;
         }
 
-        initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
-    }
+        ma_result initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
+        
+        // Attempt 2: Compatibility Fallback
+        if (initResult != MA_SUCCESS) {
+            std::cerr << "Record: Strict init failed (" << initResult << "). Retrying with compatibility defaults." << std::endl;
+            
+            // Clean reset of config
+            deviceConfig = ma_device_config_init(ma_device_type_capture);
+            deviceConfig.capture.format = ma_format_s16; // We need S16 for our callback logic
+            deviceConfig.capture.channels = 0; // Allow native channels (will update config later)
+            deviceConfig.sampleRate = 0;       // Allow native rate (will update config later)
+            deviceConfig.dataCallback = AudioDataCallback;
+            deviceConfig.pUserData = this;
+            deviceConfig.performanceProfile = ma_performance_profile_conservative;
+            
+            if (hasSelectedDevice) {
+                deviceConfig.capture.pDeviceID = &selectedDeviceID;
+            }
 
-    if (initResult != MA_SUCCESS) {
-        std::cerr << "Record: Failed to initialize device. Result=" << initResult << " (" << ma_result_description(initResult) << ")" << std::endl;
-        return E_FAIL;
+            initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
+        }
+
+        if (initResult != MA_SUCCESS) {
+            std::cerr << "Record: Failed to initialize device. Result=" << initResult << " (" << ma_result_description(initResult) << ")" << std::endl;
+            return E_FAIL;
+        }
+        m_deviceInitialized = true;
     }
-    m_deviceInitialized = true;
     
     // Update config with actual negotiated parameters
     // This ensures encoders are initialized with the correct format (e.g. 48k vs 44.1k)
     bool configChanged = false;
     
     if ((ma_uint32)m_pConfig->sampleRate != m_device.sampleRate) {
-        std::cout << "Record: Sample rate corrected from " << m_pConfig->sampleRate << " to " << m_device.sampleRate << std::endl;
+        if (!reuseDevice) std::cout << "Record: Sample rate corrected from " << m_pConfig->sampleRate << " to " << m_device.sampleRate << std::endl;
         m_pConfig->sampleRate = (int)m_device.sampleRate;
         configChanged = true;
     }
     
     if ((ma_uint32)m_pConfig->numChannels != m_device.capture.channels) {
-        std::cout << "Record: Channel count corrected from " << m_pConfig->numChannels << " to " << m_device.capture.channels << std::endl;
+        if (!reuseDevice) std::cout << "Record: Channel count corrected from " << m_pConfig->numChannels << " to " << m_device.capture.channels << std::endl;
         m_pConfig->numChannels = (int)m_device.capture.channels;
         configChanged = true;
     }
     
-    if (configChanged) {
+    if (configChanged && !reuseDevice) {
         std::cout << "Record: Final Config -> Rate: " << m_pConfig->sampleRate << ", Channels: " << m_pConfig->numChannels << std::endl;
+    }
+
+    if (!reuseDevice) {
+        m_lastDeviceId = m_pConfig->deviceId;
+        m_lastSampleRate = m_pConfig->sampleRate;
+        m_lastNumChannels = m_pConfig->numChannels;
     }
 
     // Create ring buffer
@@ -373,11 +399,11 @@ HRESULT Recorder::EndRecording() {
         }
     }
 
-    // Stop and uninit miniaudio device
+    // Stop miniaudio device (but don't uninit yet, to allow reuse)
     if (m_deviceInitialized) {
         ma_device_stop(&m_device);
-        ma_device_uninit(&m_device);
-        m_deviceInitialized = false;
+        // ma_device_uninit(&m_device); -> Moved to UninitDevice()
+        // m_deviceInitialized = false;
     }
 
     // Finalize Opus encoder
@@ -443,6 +469,8 @@ HRESULT Recorder::EndRecording() {
 
 HRESULT Recorder::Dispose() {
     HRESULT hr = EndRecording();
+
+    UninitDevice();
 
     // Uninit context
     if (m_contextInitialized) {
@@ -510,6 +538,14 @@ HRESULT Recorder::isEncoderSupported(const std::string encoderName, bool* suppor
         *supported = false;
     }
     return S_OK;
+}
+
+
+void Recorder::UninitDevice() {
+    if (m_deviceInitialized) {
+        ma_device_uninit(&m_device);
+        m_deviceInitialized = false;
+    }
 }
 
 } // namespace record_windows

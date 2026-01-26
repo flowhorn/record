@@ -59,6 +59,7 @@ namespace record_windows {
         HRESULT EndRecording();
         void UpdateState(RecordState state);
         void CalculateAmplitude(const int16_t* samples, size_t count);
+        void UninitDevice();
 
         // Thread synchronization
         CritSec m_critsec;
@@ -67,7 +68,13 @@ namespace record_windows {
         ma_context m_context;
         ma_device m_device;
         bool m_contextInitialized = false;
+
         bool m_deviceInitialized = false;
+
+        // Cached device config for reuse
+        std::string m_lastDeviceId;
+        int m_lastSampleRate = 0;
+        int m_lastNumChannels = 0;
 
         // Ring buffer for audio data
         std::unique_ptr<RingBuffer> m_ringBuffer;
