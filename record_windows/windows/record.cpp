@@ -262,7 +262,7 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
         std::cerr << "Record: Strict low latency failed (Format not supported). Retrying with default profile and native sample rate." << std::endl;
         
         // Reset config to defaults but keep callback/data
-        deviceConfig.performanceProfile = ma_performance_profile_default;
+        deviceConfig.performanceProfile = ma_performance_profile_conservative;
         deviceConfig.periodSizeInFrames = 0;
         deviceConfig.sampleRate = 0; // Let backend choose valid rate (we'll resample if needed or just use what we get)
         
