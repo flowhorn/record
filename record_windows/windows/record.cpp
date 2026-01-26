@@ -265,6 +265,8 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
         deviceConfig.performanceProfile = ma_performance_profile_conservative;
         deviceConfig.periodSizeInFrames = 0;
         deviceConfig.sampleRate = 0; // Let backend choose valid rate (we'll resample if needed or just use what we get)
+        deviceConfig.wasapi.shareMode = ma_wasapi_share_mode_shared; // Explicitly request shared mode
+
         
         // If the user *really* wanted a specific rate, miniaudio converter *should* kick in if we don't disable it.
         // But for safety, let's try 0 sample rate and just use what the device gives us. 

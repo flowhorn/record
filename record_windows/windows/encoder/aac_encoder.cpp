@@ -118,7 +118,12 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
         m_pSinkWriter = pSinkWriter;
         m_pSinkWriter->AddRef();
     } else {
-        std::cerr << "ConfigSinkWriter failed: " << hr << std::endl;
+        std::cerr << "ConfigSinkWriter failed at step " << (pSinkWriter ? "Setup" : "Creation") << ": " << hr << std::endl;
+        
+        // Detailed error check
+        if (!pSinkWriter) std::cerr << "MFCreateSinkWriterFromURL failed" << std::endl;
+        else if (!pMediaTypeOut) std::cerr << "MFCreateMediaType (Out) failed" << std::endl;
+        else if (!pMediaTypeIn) std::cerr << "MFCreateMediaType (In) failed" << std::endl;
     }
     
     SafeRelease(&pSinkWriter);
