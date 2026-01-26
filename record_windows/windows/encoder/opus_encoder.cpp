@@ -102,9 +102,12 @@ bool OpusAudioEncoder::WriteOggHeader() {
     header[pos++] = static_cast<uint8_t>(m_channels);
 
     // Pre-skip (samples) - use encoder lookahead
-    uint16_t preskip = static_cast<uint16_t>(std::min<int>(m_preSkip, 0xFFFF));
-    header[pos++] = preskip & 0xFF;
-    header[pos++] = (preskip >> 8) & 0xFF;
+    int preskip = m_preSkip;
+    if (preskip < 0) preskip = 0;
+    if (preskip > 0xFFFF) preskip = 0xFFFF;
+    uint16_t preskip16 = static_cast<uint16_t>(preskip);
+    header[pos++] = preskip16 & 0xFF;
+    header[pos++] = (preskip16 >> 8) & 0xFF;
 
     // Input sample rate (informational only, stored as little-endian)
     header[pos++] = m_sampleRate & 0xFF;
