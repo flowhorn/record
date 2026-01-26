@@ -174,7 +174,7 @@ void Recorder::EncoderThreadFunc() {
     const int frameSize = isAac ? 1024 : std::max(1, m_pConfig->sampleRate * kNonAacFrameMs / 1000);
     const size_t bytesPerSampleFrame = sizeof(int16_t) * m_pConfig->numChannels;
     const size_t bytesPerFrame = frameSize * bytesPerSampleFrame;
-    const bool isEncoded = (m_opusEncoder && m_opusEncoder->IsInitialized()) || m_aacEncoder;
+    const bool isEncoded = m_aacEncoder != nullptr;
     const bool allowPartialFrames = !isEncoded; // raw PCM/WAV/stream can use partial frames
     std::vector<int16_t> frameBuffer(frameSize * m_pConfig->numChannels);
 
@@ -225,24 +225,13 @@ void Recorder::EncoderThreadFunc() {
         const int framesRead = static_cast<int>(bytesRead / bytesPerSampleFrame);
 
         // Handle different output modes
-        if (m_opusEncoder && m_opusEncoder->IsInitialized()) {
-            // Opus file output
-            if (framesRead == frameSize) {
-                m_opusEncoder->EncodeFrame(frameBuffer.data(), frameSize);
-                m_dataWritten += bytesRead;
-            } else if (m_stopRequested.load(std::memory_order_relaxed) && framesRead > 0) {
-                std::fill(frameBuffer.begin() + framesRead * m_pConfig->numChannels, frameBuffer.end(), 0);
-                m_opusEncoder->EncodeFrame(frameBuffer.data(), frameSize);
-                m_dataWritten += bytesRead;
-            }
-        }
-        else if (m_aacEncoder) {
+        if (m_aacEncoder) {
             // AAC file output
             if (framesRead == frameSize) {
                 m_aacEncoder->EncodeFrame(frameBuffer.data(), frameSize);
                 m_dataWritten += bytesRead;
             } else if (m_stopRequested.load(std::memory_order_relaxed) && framesRead > 0) {
-                std::fill(frameBuffer.begin() + framesRead * m_pConfig->numChannels, frameBuffer.end(), 0);
+                std::fill(frameBuffer.begin() + framesRead * m_pConfig->numChannels, frameBuffer.end(), static_cast<int16_t>(0));
                 m_aacEncoder->EncodeFrame(frameBuffer.data(), frameSize);
                 m_dataWritten += bytesRead;
             }
@@ -285,16 +274,7 @@ HRESULT Recorder::Start(std::unique_ptr<RecordConfig> config, std::wstring path)
 
     if (SUCCEEDED(hr)) {
         // Set up output based on encoder
-        if (m_pConfig->encoderName == AudioEncoder().opus) {
-            // Initialize Opus encoder
-            m_opusEncoder = std::make_unique<OpusAudioEncoder>();
-            if (!m_opusEncoder->Initialize(path, m_pConfig->sampleRate, 
-                                            m_pConfig->numChannels, m_pConfig->bitRate)) {
-                EndRecording();
-                return E_FAIL;
-            }
-        }
-        else if (m_pConfig->encoderName == AudioEncoder().aacLc) {
+        if (m_pConfig->encoderName == AudioEncoder().aacLc) {
             // Initialize AAC encoder
             m_aacEncoder = std::make_unique<AacEncoder>();
             if (!m_aacEncoder->Initialize(path, m_pConfig->sampleRate, 
@@ -851,12 +831,7 @@ HRESULT Recorder::EndRecording() {
         }
     }
 
-    // Finalize Opus encoder
-    if (m_opusEncoder) {
-        m_opusEncoder->Finalize();
-        m_opusEncoder.reset();
-    }
-    
+    // Finalize AAC encoder
     if (m_aacEncoder) {
         m_aacEncoder->Finalize();
         m_aacEncoder.reset();
@@ -979,9 +954,8 @@ std::wstring Recorder::GetRecordingPath() {
 }
 
 HRESULT Recorder::isEncoderSupported(const std::string encoderName, bool* supported) {
-    // Only support opus, aacLc, pcm16bits, and wav with the new implementation
-    if (encoderName == AudioEncoder().opus ||
-        encoderName == AudioEncoder().aacLc ||
+    // Only support aacLc, pcm16bits, and wav with the new implementation
+    if (encoderName == AudioEncoder().aacLc ||
         encoderName == AudioEncoder().pcm16bits ||
         encoderName == AudioEncoder().wav) {
         *supported = true;

@@ -16,7 +16,6 @@
 #include "record_config.h"
 #include "event_stream_handler.h"
 #include "ring_buffer.h"
-#include "encoder/opus_encoder.h"
 #include "encoder/aac_encoder.h"
 
 using namespace flutter;
@@ -97,7 +96,6 @@ namespace record_windows {
         int m_targetChannels = 0;
 
         // Encoder
-        std::unique_ptr<OpusAudioEncoder> m_opusEncoder;
         std::unique_ptr<AacEncoder> m_aacEncoder;
         std::thread m_encoderThread;
         std::atomic<bool> m_encoderRunning{false};

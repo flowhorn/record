@@ -12,35 +12,6 @@ project(${PROJECT_NAME} LANGUAGES CXX C)
 # not be changed
 set(PLUGIN_NAME "record_windows_plugin")
 
-# Download prebuilt opus/ogg libraries from TeamPyOgg
-include(FetchContent)
-
-FetchContent_Declare(
-  xiph_libs
-  URL https://github.com/TeamPyOgg/VS-XiphAudioBuild/releases/download/2020.09.19/x64-ReleaseStatic.zip
-  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-)
-
-FetchContent_MakeAvailable(xiph_libs)
-
-# Prebuilt package provides .lib files only
-# Headers are bundled in include/opus/ and include/ogg/
-
-# Create imported targets for opus and ogg
-add_library(ogg STATIC IMPORTED GLOBAL)
-set_target_properties(ogg PROPERTIES
-  IMPORTED_LOCATION "${xiph_libs_SOURCE_DIR}/ogg.lib"
-)
-
-add_library(opus STATIC IMPORTED GLOBAL)
-set_target_properties(opus PROPERTIES
-  IMPORTED_LOCATION "${xiph_libs_SOURCE_DIR}/opus.lib"
-)
-# opus depends on ogg
-set_target_properties(opus PROPERTIES
-  INTERFACE_LINK_LIBRARIES ogg
-)
-
 # Any new source files that you add to the plugin should be added here.
 list(APPEND PLUGIN_SOURCES
   "record_windows_plugin.cpp"
@@ -50,8 +21,6 @@ list(APPEND PLUGIN_SOURCES
   "record.cpp"
   "ring_buffer.h"
   "encoder/encoders.h"
-  "encoder/opus_encoder.h"
-  "encoder/opus_encoder.cpp"
   "encoder/aac_encoder.h"
   "encoder/aac_encoder.cpp"
   "utils.h"
@@ -105,7 +74,7 @@ if(MSVC)
   target_link_options(${PLUGIN_NAME} PRIVATE "/NODEFAULTLIB:LIBCMT" "/IGNORE:4099" "/IGNORE:4098" "/IGNORE:4075")
 endif()
 
-target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin ogg opus mfplat mfreadwrite mfuuid)
+target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin mfplat mfreadwrite mfuuid)
 
 # List of absolute paths to libraries that should be bundled with the plugin.
 # This list could contain prebuilt libraries, or libraries created by an
