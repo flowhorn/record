@@ -10,8 +10,9 @@
 
 namespace record_windows {
 
-// Ring buffer size: 100ms of audio at 48kHz mono (16-bit samples)
-static const size_t RING_BUFFER_SIZE = 48000 * 2 * 1;  // 100ms @ 48kHz, 2 bytes/sample, mono
+// Low-latency tuning
+static const int kNonAacFrameMs = 10;      // 10ms frames for non-AAC encoders
+static const int kRingBufferMs = 40;       // Target ring buffer size
 
 // static
 HRESULT Recorder::CreateInstance(EventStreamHandler<>* stateEventHandler, 
@@ -113,41 +114,72 @@ void Recorder::OnAudioData(const void* pInput, ma_uint32 frameCount) {
 
     // Write to ring buffer (encoder thread will read from it)
     if (m_ringBuffer) {
-        m_ringBuffer->Write(reinterpret_cast<const uint8_t*>(samples), byteCount);
+        size_t written = m_ringBuffer->Write(reinterpret_cast<const uint8_t*>(samples), byteCount);
+        if (written > 0) {
+            m_dataCondition.notify_one();
+        }
     }
 }
 
 void Recorder::EncoderThreadFunc() {
-    const int frameSize = (m_pConfig && m_pConfig->encoderName == AudioEncoder().aacLc)
-        ? 1024
-        : (m_pConfig->sampleRate * 20 / 1000);  // 20ms frame for non-AAC
-    const size_t bytesPerFrame = frameSize * sizeof(int16_t) * m_pConfig->numChannels;
+    const bool isAac = (m_pConfig && m_pConfig->encoderName == AudioEncoder().aacLc);
+    const int frameSize = isAac ? 1024 : std::max(1, m_pConfig->sampleRate * kNonAacFrameMs / 1000);
+    const size_t bytesPerSampleFrame = sizeof(int16_t) * m_pConfig->numChannels;
+    const size_t bytesPerFrame = frameSize * bytesPerSampleFrame;
+    const bool isEncoded = (m_opusEncoder && m_opusEncoder->IsInitialized()) || m_aacEncoder;
+    const bool allowPartialFrames = !isEncoded; // raw PCM/WAV/stream can use partial frames
     std::vector<int16_t> frameBuffer(frameSize * m_pConfig->numChannels);
 
     while (m_encoderRunning.load(std::memory_order_relaxed)) {
-        // Wait for enough data
-        size_t available = m_ringBuffer->Available();
-        if (available < bytesPerFrame) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        size_t available = m_ringBuffer ? m_ringBuffer->Available() : 0;
+        size_t targetBytes = 0;
+
+        if (allowPartialFrames) {
+            size_t aligned = (available / bytesPerSampleFrame) * bytesPerSampleFrame;
+            targetBytes = std::min(aligned, bytesPerFrame);
+        } else if (available >= bytesPerFrame) {
+            targetBytes = bytesPerFrame;
+        }
+
+        if (targetBytes == 0) {
+            std::unique_lock<std::mutex> lock(m_dataMutex);
+            m_dataCondition.wait_for(lock, std::chrono::milliseconds(10), [&]() {
+                if (!m_encoderRunning.load(std::memory_order_relaxed)) {
+                    return true;
+                }
+                if (!m_ringBuffer) {
+                    return false;
+                }
+                size_t avail = m_ringBuffer->Available();
+                if (allowPartialFrames) {
+                    return avail >= bytesPerSampleFrame;
+                }
+                return avail >= bytesPerFrame;
+            });
             continue;
         }
 
         // Read from ring buffer
-        size_t bytesRead = m_ringBuffer->Read(reinterpret_cast<uint8_t*>(frameBuffer.data()), bytesPerFrame);
-        if (bytesRead < bytesPerFrame) {
+        size_t bytesRead = m_ringBuffer->Read(reinterpret_cast<uint8_t*>(frameBuffer.data()), targetBytes);
+        if (bytesRead < bytesPerSampleFrame) {
             continue;
         }
+        const int framesRead = static_cast<int>(bytesRead / bytesPerSampleFrame);
 
         // Handle different output modes
         if (m_opusEncoder && m_opusEncoder->IsInitialized()) {
             // Opus file output
-            m_opusEncoder->EncodeFrame(frameBuffer.data(), frameSize);
-            m_dataWritten += bytesRead;
+            if (framesRead == frameSize) {
+                m_opusEncoder->EncodeFrame(frameBuffer.data(), frameSize);
+                m_dataWritten += bytesRead;
+            }
         }
         else if (m_aacEncoder) {
             // AAC file output
-            m_aacEncoder->EncodeFrame(frameBuffer.data(), frameSize);
-            m_dataWritten += bytesRead;
+            if (framesRead == frameSize) {
+                m_aacEncoder->EncodeFrame(frameBuffer.data(), frameSize);
+                m_dataWritten += bytesRead;
+            }
         }
         else if (m_isWavOutput && m_wavFile.is_open()) {
             // WAV file output (raw PCM)
@@ -430,8 +462,15 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
         deviceConfig.dataCallback = AudioDataCallback;
         deviceConfig.pUserData = this;
         deviceConfig.performanceProfile = ma_performance_profile_low_latency;
-        deviceConfig.periodSizeInFrames = 0; 
+        if (deviceConfig.sampleRate > 0) {
+            deviceConfig.periodSizeInFrames = deviceConfig.sampleRate / (1000 / kNonAacFrameMs);
+            deviceConfig.periods = 2;
+        } else {
+            deviceConfig.periodSizeInFrames = 0;
+        }
         deviceConfig.wasapi.noHardwareOffloading = MA_TRUE; 
+        deviceConfig.wasapi.noAutoConvertSRC = MA_TRUE;
+        deviceConfig.wasapi.noAutoStreamRouting = MA_TRUE;
         
         if (hasSelectedDevice) {
             deviceConfig.capture.pDeviceID = &selectedDeviceID;
@@ -659,8 +698,14 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
         }
     }
 
-    // Create ring buffer
-    m_ringBuffer = std::make_unique<RingBuffer>(RING_BUFFER_SIZE);
+    // Create ring buffer (size based on target format and low-latency settings)
+    const int frameSize = (m_pConfig && m_pConfig->encoderName == AudioEncoder().aacLc)
+        ? 1024
+        : std::max(1, m_targetSampleRate * kNonAacFrameMs / 1000);
+    const size_t bytesPerFrame = static_cast<size_t>(frameSize) * sizeof(int16_t) * m_targetChannels;
+    const size_t targetBufferBytes = static_cast<size_t>(m_targetSampleRate) * sizeof(int16_t) * m_targetChannels * kRingBufferMs / 1000;
+    const size_t ringBufferBytes = std::max(bytesPerFrame * 4, targetBufferBytes);
+    m_ringBuffer = std::make_unique<RingBuffer>(ringBufferBytes);
 
     return S_OK;
 }
@@ -720,6 +765,7 @@ HRESULT Recorder::EndRecording() {
     // Stop encoder thread
     if (m_encoderRunning) {
         m_encoderRunning = false;
+        m_dataCondition.notify_all();
         if (m_encoderThread.joinable()) {
             m_encoderThread.join();
         }

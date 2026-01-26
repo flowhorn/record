@@ -8,6 +8,8 @@
 #include <vector>
 #include <map>
 #include <fstream>
+#include <mutex>
+#include <condition_variable>
 
 #include "miniaudio.h"
 #include "utils.h"
@@ -97,6 +99,8 @@ namespace record_windows {
         std::unique_ptr<AacEncoder> m_aacEncoder;
         std::thread m_encoderThread;
         std::atomic<bool> m_encoderRunning{false};
+        std::mutex m_dataMutex;
+        std::condition_variable m_dataCondition;
 
         // WAV file output (for pcm16bits/wav encoder)
         std::ofstream m_wavFile;
