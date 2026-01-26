@@ -4,11 +4,6 @@
 # customers of the plugin.
 cmake_minimum_required(VERSION 3.23)
 
-# Allow old cmake_minimum_required from dependencies (ogg uses an old version)
-set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
-# Suppress deprecation warnings from subprojects
-set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS ON CACHE BOOL "" FORCE)
-
 # Project-level configuration.
 set(PROJECT_NAME "record_windows")
 project(${PROJECT_NAME} LANGUAGES CXX C)
@@ -17,45 +12,86 @@ project(${PROJECT_NAME} LANGUAGES CXX C)
 # not be changed
 set(PLUGIN_NAME "record_windows_plugin")
 
-# Fetch opus and ogg from GitHub
+# Download and extract prebuilt opus and ogg libraries
 include(FetchContent)
 
-# Set install prefix to avoid "INSTALL_PREFIX must be an absolute path" error
-if(NOT CMAKE_INSTALL_PREFIX OR CMAKE_INSTALL_PREFIX STREQUAL "")
-  set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/install" CACHE PATH "" FORCE)
+# Use prebuilt binaries from xiph.org
+set(OPUS_VERSION "1.4")
+set(OGG_VERSION "1.3.6")
+
+# Download opus source
+FetchContent_Declare(
+  opus_src
+  URL https://downloads.xiph.org/releases/opus/opus-${OPUS_VERSION}.tar.gz
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+
+# Download ogg source (using zip for Windows compatibility)
+FetchContent_Declare(
+  ogg_src
+  URL https://downloads.xiph.org/releases/ogg/libogg-${OGG_VERSION}.zip
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+
+FetchContent_GetProperties(opus_src)
+if(NOT opus_src_POPULATED)
+  FetchContent_Populate(opus_src)
 endif()
 
-# Configure ogg - disable all extras
-set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-set(INSTALL_DOCS OFF CACHE BOOL "" FORCE)
-set(INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
-set(INSTALL_CMAKE_PACKAGE_MODULE OFF CACHE BOOL "" FORCE)
+FetchContent_GetProperties(ogg_src)
+if(NOT ogg_src_POPULATED)
+  FetchContent_Populate(ogg_src)
+endif()
 
-# Configure opus - disable all extras
-set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
-set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
-set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
-set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
-set(OPUS_X86_MAY_HAVE_SSE OFF CACHE BOOL "" FORCE)
-set(OPUS_X86_MAY_HAVE_SSE2 OFF CACHE BOOL "" FORCE)
-set(OPUS_X86_MAY_HAVE_SSE4_1 OFF CACHE BOOL "" FORCE)
-set(OPUS_X86_MAY_HAVE_AVX OFF CACHE BOOL "" FORCE)
-
-FetchContent_Declare(
-  ogg
-  GIT_REPOSITORY https://github.com/xiph/ogg.git
-  GIT_TAG v1.3.5
-  EXCLUDE_FROM_ALL
+# Build ogg as a static library from source files
+set(OGG_SOURCES
+  ${ogg_src_SOURCE_DIR}/src/framing.c
+  ${ogg_src_SOURCE_DIR}/src/bitwise.c
 )
 
-FetchContent_Declare(
-  opus
-  GIT_REPOSITORY https://github.com/xiph/opus.git
-  GIT_TAG v1.4
-  EXCLUDE_FROM_ALL
+add_library(ogg_static STATIC ${OGG_SOURCES})
+target_include_directories(ogg_static PUBLIC 
+  ${ogg_src_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/include/ogg  # For config_types.h
 )
 
-FetchContent_MakeAvailable(ogg opus)
+# Build opus as a static library from source files (CELT + SILK)
+file(GLOB OPUS_CELT_SOURCES ${opus_src_SOURCE_DIR}/celt/*.c)
+file(GLOB OPUS_SILK_SOURCES ${opus_src_SOURCE_DIR}/silk/*.c)
+file(GLOB OPUS_SILK_FIXED_SOURCES ${opus_src_SOURCE_DIR}/silk/fixed/*.c)
+file(GLOB OPUS_SRC_SOURCES ${opus_src_SOURCE_DIR}/src/*.c)
+
+# Remove demo/test files
+list(FILTER OPUS_SRC_SOURCES EXCLUDE REGEX ".*demo.*")
+list(FILTER OPUS_SRC_SOURCES EXCLUDE REGEX ".*test.*")
+list(FILTER OPUS_CELT_SOURCES EXCLUDE REGEX ".*demo.*")
+list(FILTER OPUS_CELT_SOURCES EXCLUDE REGEX ".*test.*")
+
+add_library(opus_static STATIC 
+  ${OPUS_CELT_SOURCES}
+  ${OPUS_SILK_SOURCES}
+  ${OPUS_SILK_FIXED_SOURCES}
+  ${OPUS_SRC_SOURCES}
+)
+
+target_include_directories(opus_static PUBLIC 
+  ${opus_src_SOURCE_DIR}/include
+)
+target_include_directories(opus_static PRIVATE
+  ${opus_src_SOURCE_DIR}
+  ${opus_src_SOURCE_DIR}/celt
+  ${opus_src_SOURCE_DIR}/silk
+  ${opus_src_SOURCE_DIR}/silk/fixed
+  ${ogg_src_SOURCE_DIR}/include
+)
+
+target_compile_definitions(opus_static PRIVATE
+  OPUS_BUILD
+  USE_ALLOCA
+  HAVE_LRINT
+  HAVE_LRINTF
+  FIXED_POINT
+)
 
 # Any new source files that you add to the plugin should be added here.
 list(APPEND PLUGIN_SOURCES
@@ -109,12 +145,12 @@ target_include_directories(${PLUGIN_NAME} INTERFACE
 )
 target_include_directories(${PLUGIN_NAME} PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
-  "${ogg_SOURCE_DIR}/include"
-  "${ogg_BINARY_DIR}/include"
-  "${opus_SOURCE_DIR}/include"
+  ${ogg_src_SOURCE_DIR}/include
+  ${opus_src_SOURCE_DIR}/include
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/ogg"
 )
 
-target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin ogg opus)
+target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin ogg_static opus_static)
 
 # List of absolute paths to libraries that should be bundled with the plugin.
 # This list could contain prebuilt libraries, or libraries created by an

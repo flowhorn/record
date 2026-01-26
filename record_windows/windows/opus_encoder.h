@@ -2,7 +2,8 @@
 
 #include <string>
 #include <cstdint>
-#include <opus/opus.h>
+#include <vector>
+#include <opus.h>
 #include <ogg/ogg.h>
 #include <fstream>
 
