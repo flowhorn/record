@@ -100,7 +100,7 @@ target_include_directories(${PLUGIN_NAME} PRIVATE
 )
 
 if(MSVC)
-  target_link_options(${PLUGIN_NAME} PRIVATE "/NODEFAULTLIB:LIBCMT")
+  target_link_options(${PLUGIN_NAME} PRIVATE "/NODEFAULTLIB:LIBCMT" "/IGNORE:4099" "/IGNORE:4098" "/IGNORE:4075")
 endif()
 
 target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin ogg opus)
