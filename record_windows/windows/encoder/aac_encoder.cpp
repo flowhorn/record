@@ -12,6 +12,29 @@ template <class T> void SafeRelease(T **ppT)
 
 namespace record_windows {
 
+static UINT32 SelectAacBytesPerSecond(int bitrate, int channels) {
+    std::vector<UINT32> supported = {12000, 16000, 20000, 24000};
+    if (channels == 6) {
+        for (auto& v : supported) v *= 6;
+    }
+
+    if (bitrate <= 0) {
+        return supported.front();
+    }
+
+    UINT32 target = static_cast<UINT32>(bitrate / 8);
+    UINT32 best = supported.front();
+    UINT32 bestDiff = std::abs((int)target - (int)best);
+    for (auto v : supported) {
+        UINT32 diff = std::abs((int)target - (int)v);
+        if (diff < bestDiff) {
+            bestDiff = diff;
+            best = v;
+        }
+    }
+    return best;
+}
+
 AacEncoder::AacEncoder() {
     HRESULT hr = MFStartup(MF_VERSION);
     if (FAILED(hr)) {
@@ -47,6 +70,9 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
     IMFSinkWriter* pSinkWriter = NULL;
     IMFMediaType* pMediaTypeOut = NULL;
     IMFMediaType* pMediaTypeIn = NULL;
+
+    const UINT32 bytesPerSecond = SelectAacBytesPerSecond(m_bitrate, m_channels);
+    const UINT32 avgBitrate = bytesPerSecond * 8;
     
     // Create the sink writer
     // Note: This relies on the file extension to select the container (e.g. .m4a)
@@ -79,8 +105,28 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
     }
     
     if (SUCCEEDED(hr)) {
-        hr = pMediaTypeOut->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, m_bitrate / 8);
+        hr = pMediaTypeOut->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+        if (FAILED(hr)) std::cerr << "SetUINT32 BitsPerSample Out failed: " << hr << std::endl;
+    }
+
+    if (SUCCEEDED(hr)) {
+        hr = pMediaTypeOut->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bytesPerSecond);
         if (FAILED(hr)) std::cerr << "SetUINT32 Bitrate Out failed: " << hr << std::endl;
+    }
+
+    if (SUCCEEDED(hr)) {
+        hr = pMediaTypeOut->SetUINT32(MF_MT_AVG_BITRATE, avgBitrate);
+        if (FAILED(hr)) std::cerr << "SetUINT32 AvgBitrate Out failed: " << hr << std::endl;
+    }
+
+    if (SUCCEEDED(hr)) {
+        hr = pMediaTypeOut->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE, 0);
+        if (FAILED(hr)) std::cerr << "SetUINT32 PayloadType Out failed: " << hr << std::endl;
+    }
+
+    if (SUCCEEDED(hr)) {
+        hr = pMediaTypeOut->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29);
+        if (FAILED(hr)) std::cerr << "SetUINT32 AACProfile Out failed: " << hr << std::endl;
     }
     
     if (SUCCEEDED(hr)) {

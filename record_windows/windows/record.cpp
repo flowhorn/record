@@ -60,7 +60,9 @@ void Recorder::OnAudioData(const void* pInput, ma_uint32 frameCount) {
 }
 
 void Recorder::EncoderThreadFunc() {
-    const int frameSize = m_pConfig->sampleRate * 20 / 1000;  // 20ms frame
+    const int frameSize = (m_pConfig && m_pConfig->encoderName == AudioEncoder().aacLc)
+        ? 1024
+        : (m_pConfig->sampleRate * 20 / 1000);  // 20ms frame for non-AAC
     const size_t bytesPerFrame = frameSize * sizeof(int16_t) * m_pConfig->numChannels;
     std::vector<int16_t> frameBuffer(frameSize * m_pConfig->numChannels);
 
@@ -207,6 +209,19 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
     m_amplitude = -160.0;
     m_maxAmplitude = -160.0;
 
+    if (m_pConfig && m_pConfig->encoderName == AudioEncoder().aacLc) {
+        if (m_pConfig->sampleRate != 44100 && m_pConfig->sampleRate != 48000) {
+            std::cout << "Record: AAC requires 44.1k or 48k. Overriding sample rate to 48000." << std::endl;
+            m_pConfig->sampleRate = 48000;
+        }
+        if (m_pConfig->numChannels < 1) {
+            m_pConfig->numChannels = 1;
+        }
+        if (m_pConfig->numChannels > 2) {
+            m_pConfig->numChannels = 2;
+        }
+    }
+
     // Initialize miniaudio context if not already done
     if (!m_contextInitialized) {
         ma_context_config contextConfig = ma_context_config_init();
@@ -288,7 +303,11 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
             deviceConfig = ma_device_config_init(ma_device_type_capture);
             deviceConfig.capture.format = ma_format_s16; // We need S16 for our callback logic
             deviceConfig.capture.channels = 0; // Allow native channels (will update config later)
-            deviceConfig.sampleRate = 0;       // Allow native rate (will update config later)
+            if (m_pConfig && m_pConfig->encoderName == AudioEncoder().aacLc) {
+                deviceConfig.sampleRate = m_pConfig->sampleRate;
+            } else {
+                deviceConfig.sampleRate = 0;   // Allow native rate (will update config later)
+            }
             deviceConfig.dataCallback = AudioDataCallback;
             deviceConfig.pUserData = this;
             deviceConfig.performanceProfile = ma_performance_profile_conservative;
