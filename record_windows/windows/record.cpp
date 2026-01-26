@@ -291,9 +291,9 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
     // Note: If miniaudio is converting, m_device.sampleRate might be the *device* rate or *internal* rate.
     // Ideally we want the rate we are receiving in the callback.
     // Since we set sampleRate=0 in retry, we are getting native rate.
-    if (m_pConfig->sampleRate != m_device.sampleRate) {
+    if ((ma_uint32)m_pConfig->sampleRate != m_device.sampleRate) {
         std::cout << "Record: Sample rate corrected from " << m_pConfig->sampleRate << " to " << m_device.sampleRate << std::endl;
-        m_pConfig->sampleRate = m_device.sampleRate;
+        m_pConfig->sampleRate = (int)m_device.sampleRate;
     }
 
     // Create ring buffer
