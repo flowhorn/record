@@ -323,6 +323,7 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
                 ma_uint32 captureDeviceCount;
                 
                 if (ma_context_get_devices(&m_context, &pPlaybackDeviceInfos, &playbackDeviceCount, &pCaptureDeviceInfos, &captureDeviceCount) == MA_SUCCESS) {
+                    std::cout << "Record: Capture devices available: " << captureDeviceCount << std::endl;
                     if (deviceIndex >= 0 && deviceIndex < (int)captureDeviceCount) {
                         selectedDeviceID = pCaptureDeviceInfos[deviceIndex].id;
                         hasSelectedDevice = true;
@@ -335,6 +336,14 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
                 }
             } catch (...) {
                 std::cerr << "Record: Exception parsing deviceId" << std::endl;
+            }
+        } else {
+            ma_device_info* pPlaybackDeviceInfos;
+            ma_uint32 playbackDeviceCount;
+            ma_device_info* pCaptureDeviceInfos;
+            ma_uint32 captureDeviceCount;
+            if (ma_context_get_devices(&m_context, &pPlaybackDeviceInfos, &playbackDeviceCount, &pCaptureDeviceInfos, &captureDeviceCount) == MA_SUCCESS) {
+                std::cout << "Record: Capture devices available: " << captureDeviceCount << std::endl;
             }
         }
     }
@@ -559,11 +568,23 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
             deviceConfig.performanceProfile = ma_performance_profile_conservative;
             deviceConfig.capture.pDeviceID = hasSelectedDevice ? &selectedDeviceID : NULL;
 
+            deviceConfig.capture.shareMode = ma_share_mode_shared;
+
             initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
             if (initResult != MA_SUCCESS && hasSelectedDevice) {
                 std::cerr << "Record: Unknown-format init failed for selected device (" << initResult << "). Retrying with default device." << std::endl;
                 deviceConfig.capture.pDeviceID = NULL;
                 initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
+            }
+
+            if (initResult != MA_SUCCESS) {
+                deviceConfig.capture.shareMode = ma_share_mode_exclusive;
+                initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
+                if (initResult != MA_SUCCESS && hasSelectedDevice) {
+                    std::cerr << "Record: Unknown-format exclusive init failed for selected device (" << initResult << "). Retrying with default device." << std::endl;
+                    deviceConfig.capture.pDeviceID = NULL;
+                    initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
+                }
             }
         }
 
