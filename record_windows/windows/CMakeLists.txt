@@ -20,21 +20,40 @@ set(PLUGIN_NAME "record_windows_plugin")
 # Fetch opus and ogg from GitHub
 include(FetchContent)
 
+# Set install prefix to avoid "INSTALL_PREFIX must be an absolute path" error
+if(NOT CMAKE_INSTALL_PREFIX OR CMAKE_INSTALL_PREFIX STREQUAL "")
+  set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/install" CACHE PATH "" FORCE)
+endif()
+
+# Configure ogg - disable all extras
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(INSTALL_DOCS OFF CACHE BOOL "" FORCE)
+set(INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+set(INSTALL_CMAKE_PACKAGE_MODULE OFF CACHE BOOL "" FORCE)
+
+# Configure opus - disable all extras
+set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+set(OPUS_X86_MAY_HAVE_SSE OFF CACHE BOOL "" FORCE)
+set(OPUS_X86_MAY_HAVE_SSE2 OFF CACHE BOOL "" FORCE)
+set(OPUS_X86_MAY_HAVE_SSE4_1 OFF CACHE BOOL "" FORCE)
+set(OPUS_X86_MAY_HAVE_AVX OFF CACHE BOOL "" FORCE)
+
 FetchContent_Declare(
   ogg
   GIT_REPOSITORY https://github.com/xiph/ogg.git
   GIT_TAG v1.3.5
+  EXCLUDE_FROM_ALL
 )
 
 FetchContent_Declare(
   opus
   GIT_REPOSITORY https://github.com/xiph/opus.git
   GIT_TAG v1.4
+  EXCLUDE_FROM_ALL
 )
-
-# Configure ogg build options
-set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
-set(INSTALL_DOCS OFF CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(ogg opus)
 
