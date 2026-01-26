@@ -14,7 +14,7 @@
 #include "record_config.h"
 #include "event_stream_handler.h"
 #include "ring_buffer.h"
-#include "opus_encoder.h"
+#include "encoder/opus_encoder.h"
 
 using namespace flutter;
 

@@ -21,22 +21,30 @@ FetchContent_Declare(
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 
-FetchContent_GetProperties(xiph_libs)
-if(NOT xiph_libs_POPULATED)
-  FetchContent_Populate(xiph_libs)
-endif()
+FetchContent_MakeAvailable(xiph_libs)
+
+# Debug: print the source directory
+message(STATUS "Xiph libs source dir: ${xiph_libs_SOURCE_DIR}")
+
+# The prebuilt package structure:
+# - include/ogg/*.h
+# - include/opus/*.h  
+# - lib/libogg.lib
+# - lib/opus.lib
 
 # Create imported targets for opus and ogg
 add_library(ogg STATIC IMPORTED GLOBAL)
 set_target_properties(ogg PROPERTIES
   IMPORTED_LOCATION "${xiph_libs_SOURCE_DIR}/lib/libogg.lib"
-  INTERFACE_INCLUDE_DIRECTORIES "${xiph_libs_SOURCE_DIR}/include"
 )
 
 add_library(opus STATIC IMPORTED GLOBAL)
 set_target_properties(opus PROPERTIES
   IMPORTED_LOCATION "${xiph_libs_SOURCE_DIR}/lib/opus.lib"
-  INTERFACE_INCLUDE_DIRECTORIES "${xiph_libs_SOURCE_DIR}/include"
+)
+# opus depends on ogg
+set_target_properties(opus PROPERTIES
+  INTERFACE_LINK_LIBRARIES ogg
 )
 
 # Any new source files that you add to the plugin should be added here.
@@ -47,8 +55,9 @@ list(APPEND PLUGIN_SOURCES
   "record.h"
   "record.cpp"
   "ring_buffer.h"
-  "opus_encoder.h"
-  "opus_encoder.cpp"
+  "encoder/encoders.h"
+  "encoder/opus_encoder.h"
+  "encoder/opus_encoder.cpp"
   "utils.h"
   "event_stream_handler.h"
 )
