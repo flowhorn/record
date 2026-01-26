@@ -52,6 +52,8 @@ list(APPEND PLUGIN_SOURCES
   "encoder/encoders.h"
   "encoder/opus_encoder.h"
   "encoder/opus_encoder.cpp"
+  "encoder/aac_encoder.h"
+  "encoder/aac_encoder.cpp"
   "utils.h"
   "event_stream_handler.h"
 )
@@ -103,7 +105,7 @@ if(MSVC)
   target_link_options(${PLUGIN_NAME} PRIVATE "/NODEFAULTLIB:LIBCMT" "/IGNORE:4099" "/IGNORE:4098" "/IGNORE:4075")
 endif()
 
-target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin ogg opus)
+target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin ogg opus mfplat mfreadwrite mfuuid)
 
 # List of absolute paths to libraries that should be bundled with the plugin.
 # This list could contain prebuilt libraries, or libraries created by an

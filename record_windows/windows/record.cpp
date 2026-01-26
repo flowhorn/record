@@ -84,6 +84,11 @@ void Recorder::EncoderThreadFunc() {
             m_opusEncoder->EncodeFrame(frameBuffer.data(), frameSize);
             m_dataWritten += bytesRead;
         }
+        else if (m_aacEncoder) {
+            // AAC file output
+            m_aacEncoder->EncodeFrame(frameBuffer.data(), frameSize);
+            m_dataWritten += bytesRead;
+        }
         else if (m_isWavOutput && m_wavFile.is_open()) {
             // WAV file output (raw PCM)
             m_wavFile.write(reinterpret_cast<char*>(frameBuffer.data()), bytesRead);
@@ -122,6 +127,15 @@ HRESULT Recorder::Start(std::unique_ptr<RecordConfig> config, std::wstring path)
             m_opusEncoder = std::make_unique<OpusAudioEncoder>();
             if (!m_opusEncoder->Initialize(path, m_pConfig->sampleRate, 
                                             m_pConfig->numChannels, m_pConfig->bitRate)) {
+                EndRecording();
+                return E_FAIL;
+            }
+        }
+        else if (m_pConfig->encoderName == AudioEncoder().aacLc) {
+            // Initialize AAC encoder
+            m_aacEncoder = std::make_unique<AacEncoder>();
+            if (!m_aacEncoder->Initialize(path, m_pConfig->sampleRate, 
+                                           m_pConfig->numChannels, m_pConfig->bitRate)) {
                 EndRecording();
                 return E_FAIL;
             }
@@ -207,7 +221,14 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
     deviceConfig.sampleRate = m_pConfig->sampleRate;
     deviceConfig.dataCallback = AudioDataCallback;
     deviceConfig.pUserData = this;
-    deviceConfig.periodSizeInFrames = m_pConfig->sampleRate * 20 / 1000;  // 20ms buffer
+    
+    // Low latency settings
+    deviceConfig.performanceProfile = ma_performance_profile_low_latency;
+    deviceConfig.periodSizeInFrames = 0; // Let WASAPI decide optimal buffer size
+    deviceConfig.wasapi.noHardwareOffloading = MA_TRUE; 
+    
+    // We still calculate our ring buffer based on ~100ms, but native buffer will be smaller
+    // deviceConfig.periodSizeInFrames = m_pConfig->sampleRate * 20 / 1000;  // REMOVED fixed 20ms buffer
 
     // Set specific device if requested
     if (!m_pConfig->deviceId.empty()) {
@@ -319,6 +340,11 @@ HRESULT Recorder::EndRecording() {
         m_opusEncoder->Finalize();
         m_opusEncoder.reset();
     }
+    
+    if (m_aacEncoder) {
+        m_aacEncoder->Finalize();
+        m_aacEncoder.reset();
+    }
 
     // Finalize WAV file
     if (m_isWavOutput && m_wavFile.is_open()) {
@@ -429,8 +455,9 @@ std::wstring Recorder::GetRecordingPath() {
 }
 
 HRESULT Recorder::isEncoderSupported(const std::string encoderName, bool* supported) {
-    // Only support opus, pcm16bits, and wav with the new implementation
+    // Only support opus, aacLc, pcm16bits, and wav with the new implementation
     if (encoderName == AudioEncoder().opus ||
+        encoderName == AudioEncoder().aacLc ||
         encoderName == AudioEncoder().pcm16bits ||
         encoderName == AudioEncoder().wav) {
         *supported = true;

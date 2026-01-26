@@ -6,5 +6,5 @@
 #include "opus_encoder.h"
 
 // Future encoders can be added here:
-// #include "aac_encoder.h"
+#include "aac_encoder.h"
 // #include "mp3_encoder.h"
