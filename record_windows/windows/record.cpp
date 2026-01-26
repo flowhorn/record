@@ -53,46 +53,68 @@ void Recorder::OnAudioData(const void* pInput, ma_uint32 frameCount) {
         return;
     }
 
-    const size_t sampleCount = frameCount * m_pConfig->numChannels;
     const int16_t* samples = nullptr;
+    ma_uint64 outFrames = 0;
 
-    if (m_captureFormat == ma_format_s16) {
-        samples = static_cast<const int16_t*>(pInput);
-    } else {
-        m_convertBuffer.resize(sampleCount);
-        if (m_captureFormat == ma_format_f32) {
-            const float* input = static_cast<const float*>(pInput);
-            for (size_t i = 0; i < sampleCount; ++i) {
-                float clamped = std::max(-1.0f, std::min(1.0f, input[i]));
-                m_convertBuffer[i] = static_cast<int16_t>(std::lrintf(clamped * 32767.0f));
-            }
-        } else if (m_captureFormat == ma_format_s32) {
-            const int32_t* input = static_cast<const int32_t*>(pInput);
-            for (size_t i = 0; i < sampleCount; ++i) {
-                int32_t v = input[i];
-                float scaled = static_cast<float>(v) / 2147483647.0f;
-                scaled = std::max(-1.0f, std::min(1.0f, scaled));
-                m_convertBuffer[i] = static_cast<int16_t>(std::lrintf(scaled * 32767.0f));
-            }
-        } else if (m_captureFormat == ma_format_u8) {
-            const uint8_t* input = static_cast<const uint8_t*>(pInput);
-            for (size_t i = 0; i < sampleCount; ++i) {
-                m_convertBuffer[i] = static_cast<int16_t>((static_cast<int>(input[i]) - 128) << 8);
-            }
-        } else {
+    if (m_dataConverterInitialized) {
+        ma_uint64 inFrames = frameCount;
+        outFrames = ma_data_converter_get_expected_output_frame_count(&m_dataConverter, inFrames);
+        if (outFrames == 0) {
+            return;
+        }
+
+        m_convertBuffer.resize(static_cast<size_t>(outFrames * m_targetChannels));
+        ma_uint64 outCapacity = outFrames;
+        if (ma_data_converter_process_pcm_frames(&m_dataConverter, pInput, &inFrames, m_convertBuffer.data(), &outCapacity) != MA_SUCCESS) {
+            return;
+        }
+        outFrames = outCapacity;
+        if (outFrames == 0) {
             return;
         }
         samples = m_convertBuffer.data();
+    } else {
+        const size_t sampleCount = frameCount * m_pConfig->numChannels;
+        if (m_captureFormat == ma_format_s16) {
+            samples = static_cast<const int16_t*>(pInput);
+            outFrames = frameCount;
+        } else {
+            m_convertBuffer.resize(sampleCount);
+            if (m_captureFormat == ma_format_f32) {
+                const float* input = static_cast<const float*>(pInput);
+                for (size_t i = 0; i < sampleCount; ++i) {
+                    float clamped = std::max(-1.0f, std::min(1.0f, input[i]));
+                    m_convertBuffer[i] = static_cast<int16_t>(std::lrintf(clamped * 32767.0f));
+                }
+            } else if (m_captureFormat == ma_format_s32) {
+                const int32_t* input = static_cast<const int32_t*>(pInput);
+                for (size_t i = 0; i < sampleCount; ++i) {
+                    int32_t v = input[i];
+                    float scaled = static_cast<float>(v) / 2147483647.0f;
+                    scaled = std::max(-1.0f, std::min(1.0f, scaled));
+                    m_convertBuffer[i] = static_cast<int16_t>(std::lrintf(scaled * 32767.0f));
+                }
+            } else if (m_captureFormat == ma_format_u8) {
+                const uint8_t* input = static_cast<const uint8_t*>(pInput);
+                for (size_t i = 0; i < sampleCount; ++i) {
+                    m_convertBuffer[i] = static_cast<int16_t>((static_cast<int>(input[i]) - 128) << 8);
+                }
+            } else {
+                return;
+            }
+            samples = m_convertBuffer.data();
+            outFrames = frameCount;
+        }
     }
 
-    size_t byteCount = sampleCount * sizeof(int16_t);
+    size_t byteCount = static_cast<size_t>(outFrames * m_pConfig->numChannels * sizeof(int16_t));
 
     // Calculate amplitude
-    CalculateAmplitude(samples, frameCount * m_pConfig->numChannels);
+    CalculateAmplitude(samples, static_cast<size_t>(outFrames * m_pConfig->numChannels));
 
     // Write to ring buffer (encoder thread will read from it)
     if (m_ringBuffer) {
-        m_ringBuffer->Write(reinterpret_cast<const uint8_t*>(pInput), byteCount);
+        m_ringBuffer->Write(reinterpret_cast<const uint8_t*>(samples), byteCount);
     }
 }
 
@@ -314,6 +336,9 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
         }
     }
 
+    bool targetRateSupported = true;
+    bool targetChannelsSupported = true;
+
     if (hasSelectedDevice) {
         ma_device_info deviceInfo;
         if (ma_context_get_device_info(&m_context, ma_device_type_capture, &selectedDeviceID, &deviceInfo) == MA_SUCCESS) {
@@ -337,11 +362,17 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
                     return false;
                 };
 
+                targetRateSupported = supportsRate(static_cast<ma_uint32>(m_pConfig->sampleRate));
+
                 if (!supportsRate(48000) && supportsRate(44100)) {
                     std::cout << "Record: Selected device does not advertise 48k. Falling back to 44.1k for AAC." << std::endl;
                     m_pConfig->sampleRate = 44100;
+                    targetRateSupported = true;
                 } else if (supportsRate(48000)) {
                     m_pConfig->sampleRate = 48000;
+                    targetRateSupported = true;
+                } else if (!supportsRate(static_cast<ma_uint32>(m_pConfig->sampleRate))) {
+                    targetRateSupported = false;
                 }
 
                 auto supportsChannels = [&](ma_uint32 channels) -> bool {
@@ -357,13 +388,19 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
                     return false;
                 };
 
+                targetChannelsSupported = supportsChannels((ma_uint32)m_pConfig->numChannels);
+
                 if (!supportsChannels((ma_uint32)m_pConfig->numChannels)) {
                     if (supportsChannels(1)) {
                         std::cout << "Record: Selected device does not advertise " << m_pConfig->numChannels << " channels. Falling back to mono for AAC." << std::endl;
                         m_pConfig->numChannels = 1;
+                        targetChannelsSupported = true;
                     } else if (supportsChannels(2)) {
                         std::cout << "Record: Selected device does not advertise " << m_pConfig->numChannels << " channels. Falling back to stereo for AAC." << std::endl;
                         m_pConfig->numChannels = 2;
+                        targetChannelsSupported = true;
+                    } else {
+                        targetChannelsSupported = false;
                     }
                 }
             }
@@ -376,8 +413,8 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
     if (!reuseDevice) {
         ma_device_config deviceConfig = ma_device_config_init(ma_device_type_capture);
         deviceConfig.capture.format = ma_format_s16;
-        deviceConfig.capture.channels = m_pConfig->numChannels;
-        deviceConfig.sampleRate = m_pConfig->sampleRate;
+        deviceConfig.capture.channels = targetChannelsSupported ? m_pConfig->numChannels : 0;
+        deviceConfig.sampleRate = targetRateSupported ? m_pConfig->sampleRate : 0;
         deviceConfig.dataCallback = AudioDataCallback;
         deviceConfig.pUserData = this;
         deviceConfig.performanceProfile = ma_performance_profile_low_latency;
@@ -463,8 +500,8 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
 
                     deviceConfig = ma_device_config_init(ma_device_type_capture);
                     deviceConfig.capture.format = fmt.format;
-                    deviceConfig.capture.channels = (fmt.channels > 0) ? fmt.channels : m_pConfig->numChannels;
-                    deviceConfig.sampleRate = (fmt.sampleRate > 0) ? fmt.sampleRate : m_pConfig->sampleRate;
+                    deviceConfig.capture.channels = (fmt.channels > 0) ? fmt.channels : 0;
+                    deviceConfig.sampleRate = (fmt.sampleRate > 0) ? fmt.sampleRate : 0;
                     deviceConfig.dataCallback = AudioDataCallback;
                     deviceConfig.pUserData = this;
                     deviceConfig.performanceProfile = ma_performance_profile_conservative;
@@ -491,15 +528,19 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
     bool configChanged = false;
     
     if ((ma_uint32)m_pConfig->sampleRate != m_device.sampleRate) {
-        if (!reuseDevice) std::cout << "Record: Sample rate corrected from " << m_pConfig->sampleRate << " to " << m_device.sampleRate << std::endl;
-        m_pConfig->sampleRate = (int)m_device.sampleRate;
-        configChanged = true;
+        if (!reuseDevice) std::cout << "Record: Device sample rate " << m_device.sampleRate << " (target " << m_pConfig->sampleRate << ")" << std::endl;
+        if (m_pConfig->encoderName != AudioEncoder().aacLc) {
+            m_pConfig->sampleRate = (int)m_device.sampleRate;
+            configChanged = true;
+        }
     }
     
     if ((ma_uint32)m_pConfig->numChannels != m_device.capture.channels) {
-        if (!reuseDevice) std::cout << "Record: Channel count corrected from " << m_pConfig->numChannels << " to " << m_device.capture.channels << std::endl;
-        m_pConfig->numChannels = (int)m_device.capture.channels;
-        configChanged = true;
+        if (!reuseDevice) std::cout << "Record: Device channels " << m_device.capture.channels << " (target " << m_pConfig->numChannels << ")" << std::endl;
+        if (m_pConfig->encoderName != AudioEncoder().aacLc) {
+            m_pConfig->numChannels = (int)m_device.capture.channels;
+            configChanged = true;
+        }
     }
     
     if (configChanged && !reuseDevice) {
@@ -510,6 +551,39 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
         m_lastDeviceId = m_pConfig->deviceId;
         m_lastSampleRate = m_pConfig->sampleRate;
         m_lastNumChannels = m_pConfig->numChannels;
+    }
+
+    // Configure data converter if needed (e.g., device native rate differs from target)
+    m_inputFormat = m_captureFormat;
+    m_inputSampleRate = (int)m_device.sampleRate;
+    m_inputChannels = (int)m_device.capture.channels;
+    m_targetSampleRate = m_pConfig->sampleRate;
+    m_targetChannels = m_pConfig->numChannels;
+
+    if (m_dataConverterInitialized) {
+        ma_data_converter_uninit(&m_dataConverter, NULL);
+        m_dataConverterInitialized = false;
+    }
+
+    if (m_inputFormat != ma_format_s16 ||
+        m_inputSampleRate != m_targetSampleRate ||
+        m_inputChannels != m_targetChannels) {
+        ma_data_converter_config dcConfig = ma_data_converter_config_init(
+            m_inputFormat,
+            ma_format_s16,
+            (ma_uint32)m_inputChannels,
+            (ma_uint32)m_targetChannels,
+            (ma_uint32)m_inputSampleRate,
+            (ma_uint32)m_targetSampleRate);
+        dcConfig.resampling.algorithm = ma_resample_algorithm_linear;
+        dcConfig.resampling.linear.lpfOrder = 4;
+
+        if (ma_data_converter_init(&dcConfig, NULL, &m_dataConverter) == MA_SUCCESS) {
+            m_dataConverterInitialized = true;
+            std::cout << "Record: Data converter enabled (" << m_inputSampleRate << "->" << m_targetSampleRate << ", ch " << m_inputChannels << "->" << m_targetChannels << ")." << std::endl;
+        } else {
+            std::cerr << "Record: Failed to initialize data converter." << std::endl;
+        }
     }
 
     // Create ring buffer
@@ -635,6 +709,11 @@ HRESULT Recorder::EndRecording() {
 
     // Reset ring buffer
     m_ringBuffer.reset();
+
+    if (m_dataConverterInitialized) {
+        ma_data_converter_uninit(&m_dataConverter, NULL);
+        m_dataConverterInitialized = false;
+    }
 
     // Reset state
     m_amplitude = -160.0;

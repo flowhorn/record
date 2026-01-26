@@ -83,6 +83,15 @@ namespace record_windows {
         ma_format m_captureFormat = ma_format_s16;
         std::vector<int16_t> m_convertBuffer;
 
+        // Data converter for resampling/format conversion
+        ma_data_converter m_dataConverter;
+        bool m_dataConverterInitialized = false;
+        ma_format m_inputFormat = ma_format_s16;
+        int m_inputSampleRate = 0;
+        int m_inputChannels = 0;
+        int m_targetSampleRate = 0;
+        int m_targetChannels = 0;
+
         // Encoder
         std::unique_ptr<OpusAudioEncoder> m_opusEncoder;
         std::unique_ptr<AacEncoder> m_aacEncoder;
