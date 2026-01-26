@@ -4,6 +4,9 @@
 # customers of the plugin.
 cmake_minimum_required(VERSION 3.23)
 
+# Allow old cmake_minimum_required from dependencies (ogg uses an old version)
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+
 # Project-level configuration.
 set(PROJECT_NAME "record_windows")
 project(${PROJECT_NAME} LANGUAGES CXX C)
