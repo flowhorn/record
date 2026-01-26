@@ -209,9 +209,22 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
 
     // Set specific device if requested
     if (!m_pConfig->deviceId.empty()) {
-        // Device ID is provided - we'll need to enumerate and find it
-        // For now, use default device
-        deviceConfig.capture.pDeviceID = NULL;
+        try {
+            int deviceIndex = std::stoi(m_pConfig->deviceId);
+            
+            ma_device_info* pPlaybackDeviceInfos;
+            ma_uint32 playbackDeviceCount;
+            ma_device_info* pCaptureDeviceInfos;
+            ma_uint32 captureDeviceCount;
+            
+            if (ma_context_get_devices(&m_context, &pPlaybackDeviceInfos, &playbackDeviceCount, &pCaptureDeviceInfos, &captureDeviceCount) == MA_SUCCESS) {
+                if (deviceIndex >= 0 && deviceIndex < (int)captureDeviceCount) {
+                    deviceConfig.capture.pDeviceID = &pCaptureDeviceInfos[deviceIndex].id;
+                }
+            }
+        } catch (...) {
+            // Ignore parsing errors and use default device
+        }
     }
 
     if (ma_device_init(&m_context, &deviceConfig, &m_device) != MA_SUCCESS) {
