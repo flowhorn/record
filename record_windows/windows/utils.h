@@ -14,104 +14,86 @@ using namespace flutter;
 //////////////////////////////////////////////////////////////////////////
 template <typename T>
 T GetArgument(const std::string arg, const EncodableValue* args, T fallback) {
-	T result{ fallback };
-	const auto* arguments = std::get_if<EncodableMap>(args);
-	if (arguments) {
-		auto result_it = arguments->find(EncodableValue(arg));
-		if (result_it != arguments->end()) {
-			if (!result_it->second.IsNull())
-				result = std::get<T>(result_it->second);
-		}
-	}
-	return result;
+    T result{ fallback };
+    const auto* arguments = std::get_if<EncodableMap>(args);
+    if (arguments) {
+        auto result_it = arguments->find(EncodableValue(arg));
+        if (result_it != arguments->end()) {
+            if (!result_it->second.IsNull())
+                result = std::get<T>(result_it->second);
+        }
+    }
+    return result;
 }
 
 template <typename T>
 static bool GetValueFromEncodableMap(const flutter::EncodableMap* map,
-	const char* key, T& out) {
-	auto iter = map->find(flutter::EncodableValue(key));
-	if (iter != map->end() && !iter->second.IsNull()) {
-		if (auto* value = std::get_if<T>(&iter->second)) {
-			out = *value;
-			return true;
-		}
-	}
-	return false;
+    const char* key, T& out) {
+    auto iter = map->find(flutter::EncodableValue(key));
+    if (iter != map->end() && !iter->second.IsNull()) {
+        if (auto* value = std::get_if<T>(&iter->second)) {
+            out = *value;
+            return true;
+        }
+    }
+    return false;
 }
 
 //////////////////////////////////////////////////////////////////////////
-//  COM Safe release
+//  String conversion utilities
 //////////////////////////////////////////////////////////////////////////
-
-template <class T> void SafeRelease(T** ppT)
-{
-	if (*ppT)
-	{
-		(*ppT)->Release();
-		*ppT = NULL;
-	}
-}
-
-template <class T> inline void SafeRelease(T*& pT)
-{
-	if (pT != NULL)
-	{
-		pT->Release();
-		pT = NULL;
-	}
-}
 
 inline std::string toString(LPCWSTR pwsz) {
-	int cch = WideCharToMultiByte(CP_UTF8, 0, pwsz, -1, 0, 0, NULL, NULL);
+    int cch = WideCharToMultiByte(CP_UTF8, 0, pwsz, -1, 0, 0, NULL, NULL);
 
-	char* psz = new char[cch];
+    char* psz = new char[cch];
 
-	WideCharToMultiByte(CP_UTF8, 0, pwsz, -1, psz, cch, NULL, NULL);
+    WideCharToMultiByte(CP_UTF8, 0, pwsz, -1, psz, cch, NULL, NULL);
 
-	std::string st(psz);
-	delete[] psz;
+    std::string st(psz);
+    delete[] psz;
 
-	return st;
+    return st;
 }
 
 inline std::string Utf8FromUtf16(const std::wstring& utf16_string) {
-	if (utf16_string.empty()) {
-		return std::string();
-	}
-	int target_length = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, utf16_string.data(), static_cast<int>(utf16_string.length()), nullptr, 0, nullptr, nullptr);
+    if (utf16_string.empty()) {
+        return std::string();
+    }
+    int target_length = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, utf16_string.data(), static_cast<int>(utf16_string.length()), nullptr, 0, nullptr, nullptr);
 
-	std::string utf8_string;
-	if (target_length == 0 || target_length > utf8_string.max_size()) {
-		return utf8_string;
-	}
+    std::string utf8_string;
+    if (target_length == 0 || target_length > utf8_string.max_size()) {
+        return utf8_string;
+    }
 
-	utf8_string.resize(target_length);
-	int converted_length = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, utf16_string.data(), static_cast<int>(utf16_string.length()), utf8_string.data(), target_length, nullptr, nullptr);
-	if (converted_length == 0) {
-		return std::string();
-	}
+    utf8_string.resize(target_length);
+    int converted_length = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, utf16_string.data(), static_cast<int>(utf16_string.length()), utf8_string.data(), target_length, nullptr, nullptr);
+    if (converted_length == 0) {
+        return std::string();
+    }
 
-	return utf8_string;
+    return utf8_string;
 }
 
 inline std::wstring Utf16FromUtf8(const std::string& utf8_string) {
-	if (utf8_string.empty()) {
-		return std::wstring();
-	}
+    if (utf8_string.empty()) {
+        return std::wstring();
+    }
 
-	int target_length = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8_string.data(), static_cast<int>(utf8_string.length()), nullptr, 0);
-	std::wstring utf16_string;
-	if (target_length == 0 || target_length > utf16_string.max_size()) {
-		return utf16_string;
-	}
+    int target_length = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8_string.data(), static_cast<int>(utf8_string.length()), nullptr, 0);
+    std::wstring utf16_string;
+    if (target_length == 0 || target_length > utf16_string.max_size()) {
+        return utf16_string;
+    }
 
-	utf16_string.resize(target_length);
-	int converted_length = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8_string.data(), static_cast<int>(utf8_string.length()), utf16_string.data(), target_length);
-	if (converted_length == 0) {
-		return std::wstring();
-	}
+    utf16_string.resize(target_length);
+    int converted_length = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8_string.data(), static_cast<int>(utf8_string.length()), utf16_string.data(), target_length);
+    if (converted_length == 0) {
+        return std::wstring();
+    }
 
-	return utf16_string;
+    return utf16_string;
 }
 
 
@@ -123,27 +105,27 @@ inline std::wstring Utf16FromUtf8(const std::string& utf8_string) {
 class CritSec
 {
 private:
-	CRITICAL_SECTION m_criticalSection;
+    CRITICAL_SECTION m_criticalSection;
 public:
-	CritSec()
-	{
-		InitializeCriticalSection(&m_criticalSection);
-	}
+    CritSec()
+    {
+        InitializeCriticalSection(&m_criticalSection);
+    }
 
-	~CritSec()
-	{
-		DeleteCriticalSection(&m_criticalSection);
-	}
+    ~CritSec()
+    {
+        DeleteCriticalSection(&m_criticalSection);
+    }
 
-	void Lock()
-	{
-		EnterCriticalSection(&m_criticalSection);
-	}
+    void Lock()
+    {
+        EnterCriticalSection(&m_criticalSection);
+    }
 
-	void Unlock()
-	{
-		LeaveCriticalSection(&m_criticalSection);
-	}
+    void Unlock()
+    {
+        LeaveCriticalSection(&m_criticalSection);
+    }
 };
 
 
@@ -158,15 +140,15 @@ public:
 class AutoLock
 {
 private:
-	CritSec* m_pCriticalSection;
+    CritSec* m_pCriticalSection;
 public:
-	AutoLock(CritSec& crit)
-	{
-		m_pCriticalSection = &crit;
-		m_pCriticalSection->Lock();
-	}
-	~AutoLock()
-	{
-		m_pCriticalSection->Unlock();
-	}
+    AutoLock(CritSec& crit)
+    {
+        m_pCriticalSection = &crit;
+        m_pCriticalSection->Lock();
+    }
+    ~AutoLock()
+    {
+        m_pCriticalSection->Unlock();
+    }
 };

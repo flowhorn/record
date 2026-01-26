@@ -1,559 +1,428 @@
 #include "record.h"
 #include "record_windows_plugin.h"
 
-namespace record_windows
-{
-	// static
-	HRESULT Recorder::CreateInstance(EventStreamHandler<>* stateEventHandler, EventStreamHandler<>* recordEventHandler, Recorder** ppRecorder)
-	{
-		auto pRecorder = new (std::nothrow) Recorder(stateEventHandler, recordEventHandler);
-
-		if (pRecorder == NULL)
-		{
-			return E_OUTOFMEMORY;
-		}
-
-		// The Recorder constructor sets the ref count to 1.
-		*ppRecorder = pRecorder;
-
-		return S_OK;
-	}
-
-	Recorder::Recorder(EventStreamHandler<>* stateEventHandler, EventStreamHandler<>* recordEventHandler)
-		: m_nRefCount(1),
-		m_critsec(),
-		m_pConfig(nullptr),
-		m_pSource(NULL),
-		m_pReader(NULL),
-		m_pWriter(NULL),
-		m_pPresentationDescriptor(NULL),
-		m_stateEventHandler(stateEventHandler),
-		m_recordEventHandler(recordEventHandler),
-		m_recordingPath(std::wstring()),
-		m_pMediaType(NULL)
-	{
-	}
-
-	Recorder::~Recorder()
-	{
-		Dispose();
-	}
-
-	HRESULT Recorder::Start(std::unique_ptr<RecordConfig> config, std::wstring path)
-	{
-		bool supported = false;
-		HRESULT hr = isEncoderSupported(config->encoderName, &supported);
-
-		if (FAILED(hr) || !supported)
-		{
-			return E_NOTIMPL;
-		}
-
-		hr = InitRecording(std::move(config));
-
-		if (SUCCEEDED(hr))
-		{
-			m_recordingPath = path;
-			hr = CreateSinkWriter(path);
-		}
-		if (SUCCEEDED(hr))
-		{
-			// Request the first sample
-			hr = m_pReader->ReadSample((DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM,
-				0,
-				NULL, NULL, NULL, NULL
-			);
-		}
-		if (SUCCEEDED(hr))
-		{
-			UpdateState(RecordState::record);
-		}
-		else
-		{
-			EndRecording();
-		}
-
-		return hr;
-	}
-
-	HRESULT Recorder::StartStream(std::unique_ptr<RecordConfig> config)
-	{
-		if (config->encoderName != AudioEncoder().pcm16bits)
-		{
-			return E_NOTIMPL;
-		}
-
-		HRESULT hr = InitRecording(std::move(config));
-
-		if (SUCCEEDED(hr))
-		{
-			// Request the first sample
-			hr = m_pReader->ReadSample((DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM,
-				0,
-				NULL, NULL, NULL, NULL
-			);
-		}
-		if (SUCCEEDED(hr))
-		{
-			UpdateState(RecordState::record);
-		}
-		else
-		{
-			EndRecording();
-		}
-
-		return hr;
-	}
-
-	HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config)
-	{
-		HRESULT hr = EndRecording();
-
-		m_pConfig = std::move(config);
-
-		if (SUCCEEDED(hr))
-		{
-			if (!m_mfStarted)
-			{
-				hr = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
-			}
-			if (SUCCEEDED(hr))
-			{
-				m_mfStarted = true;
-			}
-		}
-
-		if (SUCCEEDED(hr))
-		{
-			if (m_pConfig->deviceId.length() != 0)
-			{
-				auto deviceId = std::wstring(m_pConfig->deviceId.begin(), m_pConfig->deviceId.end());
-				hr = CreateAudioCaptureDevice(deviceId.c_str());
-			}
-			else
-			{
-				hr = CreateAudioCaptureDevice(NULL);
-			}
-		}
-		if (SUCCEEDED(hr))
-		{
-			hr = CreateSourceReaderAsync();
-		}
-
-		return hr;
-	}
-
-	HRESULT Recorder::Pause()
-	{
-		HRESULT hr = S_OK;
-
-		if (m_pSource)
-		{
-			hr = m_pSource->Pause();
-
-			if (SUCCEEDED(hr))
-			{
-				UpdateState(RecordState::pause);
-			}
-		}
-
-		return S_OK;
-	}
-
-	HRESULT Recorder::Resume()
-	{
-		HRESULT hr = S_OK;
-
-		if (m_pSource)
-		{
-			PROPVARIANT var;
-			PropVariantInit(&var);
-			var.vt = VT_EMPTY;
-
-			m_llBaseTime = m_llLastTime;
-
-			hr = m_pSource->Start(m_pPresentationDescriptor, NULL, &var);
-
-			if (SUCCEEDED(hr))
-			{
-				UpdateState(RecordState::record);
-			}
-		}
-
-		return hr;
-	}
-
-	HRESULT Recorder::Stop()
-	{
-		if (m_dataWritten == 0)
-		{
-			return Cancel();
-		}
-
-		HRESULT hr = EndRecording();
-
-		if (SUCCEEDED(hr))
-		{
-			UpdateState(RecordState::stop);
-		}
-
-		return hr;
-	}
-
-	HRESULT Recorder::Cancel()
-	{
-		auto recordingPath = GetRecordingPath();
-		HRESULT hr = EndRecording();
-
-		if (SUCCEEDED(hr))
-		{
-			UpdateState(RecordState::stop);
-
-			if (!recordingPath.empty())
-			{
-				DeleteFile(recordingPath.c_str());
-			}
-		}
-
-		return hr;
-	}
-
-	bool Recorder::IsPaused()
-	{
-		switch (m_recordState)
-		{
-		case RecordState::pause:
-			return true;
-		default:
-			return false;
-		}
-	}
-
-	bool Recorder::IsRecording()
-	{
-		switch (m_recordState)
-		{
-		case RecordState::record:
-			return true;
-		default:
-			return false;
-		}
-	}
-
-	HRESULT Recorder::EndRecording()
-	{
-		AutoLock lock(m_critsec);
-		HRESULT hr = S_OK;
-
-		// Release reader callback first
-		SafeRelease(m_pReader);
-
-		if (m_pSource)
-		{
-			hr = m_pSource->Stop();
-
-			if (SUCCEEDED(hr))
-			{
-				hr = m_pSource->Shutdown();
-			}
-		}
-
-		if (m_pWriter)
-		{
-			hr = m_pWriter->Finalize();
-		}
-
-		if (m_pConfig && m_pConfig->encoderName == AudioEncoder().wav) {
-			FillWavHeader();
-		}
-
-		m_bFirstSample = true;
-		m_llBaseTime = 0;
-		m_llLastTime = 0;
-
-		m_amplitude = -160;
-		m_maxAmplitude = -160;
-
-		if (m_mfStarted)
-		{
-			hr = MFShutdown();
-			if (SUCCEEDED(hr))
-			{
-				m_mfStarted = false;
-			}
-		}
-
-		SafeRelease(m_pSource);
-		SafeRelease(m_pPresentationDescriptor);
-		SafeRelease(m_pWriter);
-		SafeRelease(m_pMediaType);
-		m_pConfig = nullptr;
-		m_recordingPath = std::wstring();
-
-		return hr;
-	}
-
-	HRESULT Recorder::Dispose()
-	{
-		HRESULT hr = EndRecording();
-
-		m_stateEventHandler = nullptr;
-		m_recordEventHandler = nullptr;
-
-		return hr;
-	}
-
-	void Recorder::UpdateState(RecordState state)
-	{
-		m_recordState = state;
-
-		if (m_stateEventHandler) {
-			// Capture raw pointer and check before calling. This is minimal and
-			// mirrors previous behavior with a quick null check on the main thread.
-			EventStreamHandler<>* handlerPtr = m_stateEventHandler;
-			RecordWindowsPlugin::RunOnMainThread([handlerPtr, state]() -> void {
-				if (handlerPtr) {
-					handlerPtr->Success(std::make_unique<flutter::EncodableValue>(state));
-				}
-			});
-		}
-	}
-
-	HRESULT Recorder::CreateAudioCaptureDevice(LPCWSTR deviceId)
-	{
-		IMFAttributes* pAttributes = NULL;
-
-		HRESULT hr = MFCreateAttributes(&pAttributes, 2);
-
-		// Set the device type to audio.
-		if (SUCCEEDED(hr))
-		{
-			hr = pAttributes->SetGUID(
-				MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
-				MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_AUDCAP_GUID
-			);
-		}
-
-		// Set the endpoint ID.
-		if (SUCCEEDED(hr) && deviceId)
-		{
-			hr = pAttributes->SetString(
-				MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_AUDCAP_ENDPOINT_ID,
-				deviceId
-			);
-		}
-
-		// Create the source
-		if (SUCCEEDED(hr))
-		{
-			hr = MFCreateDeviceSource(pAttributes, &m_pSource);
-		}
-		// Create presentation descriptor to handle Resume action
-		if (SUCCEEDED(hr))
-		{
-			hr = m_pSource->CreatePresentationDescriptor(&m_pPresentationDescriptor);
-		}
-
-		SafeRelease(&pAttributes);
-		return hr;
-	}
-
-	HRESULT Recorder::CreateSourceReaderAsync()
-	{
-		HRESULT hr = S_OK;
-		IMFAttributes* pAttributes = NULL;
-		IMFMediaType* pMediaTypeIn = NULL;
-
-		hr = MFCreateAttributes(&pAttributes, 1);
-		if (SUCCEEDED(hr))
-		{
-			hr = pAttributes->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, this);
-		}
-		if (SUCCEEDED(hr))
-		{
-			hr = MFCreateSourceReaderFromMediaSource(m_pSource, pAttributes, &m_pReader);
-		}
-		if (SUCCEEDED(hr))
-		{
-			hr = CreateAudioProfileIn(&pMediaTypeIn);
-		}
-		if (SUCCEEDED(hr))
-		{
-			hr = m_pReader->SetCurrentMediaType(0, NULL, pMediaTypeIn);
-		}
-
-		SafeRelease(&pMediaTypeIn);
-		SafeRelease(&pAttributes);
-		return hr;
-	}
-
-	HRESULT Recorder::CreateSinkWriter(std::wstring path)
-	{
-		IMFSinkWriter* pSinkWriter = NULL;
-		IMFMediaType* pMediaTypeOut = NULL;
-		IMFMediaType* pMediaTypeIn = NULL;
-		DWORD          streamIndex = 0;
-
-		HRESULT hr = MFCreateSinkWriterFromURL(path.c_str(), NULL, NULL, &pSinkWriter);
-
-		// Set the output media type.
-		if (SUCCEEDED(hr))
-		{
-			hr = CreateAudioProfileOut(&pMediaTypeOut);
-		}
-		if (SUCCEEDED(hr))
-		{
-			hr = pSinkWriter->AddStream(pMediaTypeOut, &streamIndex);
-		}
-
-		// Set the input media type.
-		if (SUCCEEDED(hr))
-		{
-			hr = m_pReader->GetCurrentMediaType(streamIndex, &pMediaTypeIn);
-		}
-		if (SUCCEEDED(hr))
-		{
-			hr = pSinkWriter->SetInputMediaType(streamIndex, pMediaTypeIn, NULL);
-		}
-
-		// Tell the sink writer to Start accepting data.
-		if (SUCCEEDED(hr))
-		{
-			hr = pSinkWriter->BeginWriting();
-		}
-
-		if (SUCCEEDED(hr))
-		{
-			m_pWriter = pSinkWriter;
-			m_pWriter->AddRef();
-			m_pMediaType = pMediaTypeOut;
-			m_pMediaType->AddRef();
-		}
-
-		SafeRelease(&pSinkWriter);
-		SafeRelease(&pMediaTypeOut);
-		SafeRelease(&pMediaTypeIn);
-
-		return hr;
-	}
-
-	std::map<std::string, double> Recorder::GetAmplitude()
-	{
-		return {
-			{"current", m_amplitude},
-			{"max" , m_maxAmplitude},
-		};
-	}
-
-	void Recorder::GetAmplitude(BYTE* chunk, DWORD size, int bytesPerSample) {
-		int maxSample = -160;
-
-		if (bytesPerSample == 2) { // PCM 16 bits
-			auto values = convertBytesToInt16(chunk, size);
-
-			for (DWORD i = 0; i < size; i++) {
-				int curSample = std::abs(values[i]);
-				if (curSample > maxSample) {
-					maxSample = curSample;
-				}
-			}
-
-			m_amplitude = 20 * std::log10(maxSample / 32767.0); // 16 signed bits 2^15 - 1
-		}
-		else /* if (bytesPerSample == 1) */ { // PCM 8 bits
-			for (DWORD i = 0; i < size; i++) {
-				byte curSample = chunk[i];
-				if (curSample > maxSample) {
-					maxSample = curSample;
-				}
-			}
-
-			m_amplitude = 20 * std::log10(maxSample / 256.0); // 8 unsigned bits 2^8
-		}
-
-		if (m_amplitude > m_maxAmplitude) {
-			m_maxAmplitude = m_amplitude;
-		}
-	}
-
-	std::wstring Recorder::GetRecordingPath()
-	{
-		return m_recordingPath;
-	}
-
-	std::vector<int16_t> Recorder::convertBytesToInt16(BYTE* bytes, DWORD size)
-	{
-		// Convert to int16
-		std::vector<int16_t> values(size / 2);
-
-		int n = 1;
-		if (*(char*)&n == 1) {
-			// We're on little endian host
-			for (DWORD i = 0; i < size; i += 2) {
-				values.push_back(int16_t(bytes[i] << 0 | bytes[i + 1] << 8));
-			}
-		}
-		else {
-			// We're on big endian host
-			for (DWORD i = 0; i < size; i += 2) {
-				values.push_back(int16_t(bytes[i + 1] | bytes[i] << 8));
-			}
-		}
-
-		return values;
-	}
-
-	HRESULT Recorder::isEncoderSupported(const std::string encoderName, bool* supported)
-	{
-		MFT_REGISTER_TYPE_INFO typeLookup = {};
-		typeLookup.guidMajorType = MFMediaType_Audio;
-
-		if (encoderName == AudioEncoder().aacLc) typeLookup.guidSubtype = MFAudioFormat_AAC;
-		/*else if (encoderName == AudioEncoder().aacEld) typeLookup.guidSubtype = MFAudioFormat_AAC;
-		else if (encoderName == AudioEncoder().aacHe) typeLookup.guidSubtype = MFAudioFormat_AAC;*/
-		else if (encoderName == AudioEncoder().amrNb) typeLookup.guidSubtype = MFAudioFormat_AMR_NB;
-		else if (encoderName == AudioEncoder().amrWb) typeLookup.guidSubtype = MFAudioFormat_AMR_WB;
-		else if (encoderName == AudioEncoder().opus) typeLookup.guidSubtype = MFAudioFormat_Opus;
-		else if (encoderName == AudioEncoder().flac) typeLookup.guidSubtype = MFAudioFormat_FLAC;
-		else if (encoderName == AudioEncoder().pcm16bits || encoderName == AudioEncoder().wav) {
-			*supported = true;
-			return S_OK;
-		}
-		else {
-			*supported = false;
-			return S_OK;
-		}
-
-		// Enumerate all codecs except for codecs with field-of-use restrictions.
-		// Sort the results.
-		DWORD dwFlags =
-			(MFT_ENUM_FLAG_ALL & (~MFT_ENUM_FLAG_FIELDOFUSE)) |
-			MFT_ENUM_FLAG_SORTANDFILTER;
-
-		IMFActivate** ppMFTActivate = NULL;		// array of IMFActivate interface pointers
-		UINT32 numMFTActivate;
-
-		// Gets a list of output formats from an audio encoder.
-		HRESULT hr = MFTEnumEx(
-			MFT_CATEGORY_AUDIO_ENCODER,
-			dwFlags,
-			NULL,
-			&typeLookup,
-			&ppMFTActivate,
-			&numMFTActivate
-		);
-
-		if (SUCCEEDED(hr))
-		{
-			*supported = numMFTActivate != 0;
-		}
-
-		for (UINT32 i = 0; i < numMFTActivate; i++)
-		{
-			SafeRelease(ppMFTActivate[i]);
-		}
-		CoTaskMemFree(ppMFTActivate);
-
-		return hr;
-	}
-};
+// Miniaudio implementation
+#define MINIAUDIO_IMPLEMENTATION
+#define MA_NO_DECODING
+#define MA_NO_ENCODING
+#define MA_NO_GENERATION
+#define MA_NO_ENGINE
+#define MA_NO_NODE_GRAPH
+#define MA_NO_RESOURCE_MANAGER
+#include "miniaudio.h"
+
+namespace record_windows {
+
+// Ring buffer size: 100ms of audio at 48kHz mono (16-bit samples)
+static const size_t RING_BUFFER_SIZE = 48000 * 2 * 1;  // 100ms @ 48kHz, 2 bytes/sample, mono
+
+// static
+HRESULT Recorder::CreateInstance(EventStreamHandler<>* stateEventHandler, 
+                                  EventStreamHandler<>* recordEventHandler, 
+                                  Recorder** ppRecorder) {
+    auto pRecorder = new (std::nothrow) Recorder(stateEventHandler, recordEventHandler);
+    if (pRecorder == NULL) {
+        return E_OUTOFMEMORY;
+    }
+    *ppRecorder = pRecorder;
+    return S_OK;
+}
+
+Recorder::Recorder(EventStreamHandler<>* stateEventHandler, EventStreamHandler<>* recordEventHandler)
+    : m_stateEventHandler(stateEventHandler),
+      m_recordEventHandler(recordEventHandler) {
+}
+
+Recorder::~Recorder() {
+    Dispose();
+}
+
+// static
+void Recorder::AudioDataCallback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
+    (void)pOutput;  // Unused for capture
+    
+    Recorder* recorder = static_cast<Recorder*>(pDevice->pUserData);
+    if (recorder) {
+        recorder->OnAudioData(pInput, frameCount);
+    }
+}
+
+void Recorder::OnAudioData(const void* pInput, ma_uint32 frameCount) {
+    if (m_isPaused.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    const int16_t* samples = static_cast<const int16_t*>(pInput);
+    size_t byteCount = frameCount * sizeof(int16_t) * m_pConfig->numChannels;
+
+    // Calculate amplitude
+    CalculateAmplitude(samples, frameCount * m_pConfig->numChannels);
+
+    // Write to ring buffer (encoder thread will read from it)
+    if (m_ringBuffer) {
+        m_ringBuffer->Write(reinterpret_cast<const uint8_t*>(pInput), byteCount);
+    }
+}
+
+void Recorder::EncoderThreadFunc() {
+    const int frameSize = m_pConfig->sampleRate * 20 / 1000;  // 20ms frame
+    const size_t bytesPerFrame = frameSize * sizeof(int16_t) * m_pConfig->numChannels;
+    std::vector<int16_t> frameBuffer(frameSize * m_pConfig->numChannels);
+
+    while (m_encoderRunning.load(std::memory_order_relaxed)) {
+        // Wait for enough data
+        size_t available = m_ringBuffer->Available();
+        if (available < bytesPerFrame) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
+
+        // Read from ring buffer
+        size_t bytesRead = m_ringBuffer->Read(reinterpret_cast<uint8_t*>(frameBuffer.data()), bytesPerFrame);
+        if (bytesRead < bytesPerFrame) {
+            continue;
+        }
+
+        // Handle different output modes
+        if (m_opusEncoder && m_opusEncoder->IsInitialized()) {
+            // Opus file output
+            m_opusEncoder->EncodeFrame(frameBuffer.data(), frameSize);
+            m_dataWritten += bytesRead;
+        }
+        else if (m_isWavOutput && m_wavFile.is_open()) {
+            // WAV file output (raw PCM)
+            m_wavFile.write(reinterpret_cast<char*>(frameBuffer.data()), bytesRead);
+            m_dataWritten += bytesRead;
+        }
+        else if (m_recordEventHandler) {
+            // PCM stream to Flutter
+            std::vector<uint8_t> bytes(reinterpret_cast<uint8_t*>(frameBuffer.data()),
+                                       reinterpret_cast<uint8_t*>(frameBuffer.data()) + bytesRead);
+            
+            RecordWindowsPlugin::RunOnMainThread([this, bytes]() -> void {
+                if (m_recordEventHandler) {
+                    m_recordEventHandler->Success(std::make_unique<flutter::EncodableValue>(bytes));
+                }
+            });
+            m_dataWritten += bytesRead;
+        }
+    }
+}
+
+HRESULT Recorder::Start(std::unique_ptr<RecordConfig> config, std::wstring path) {
+    bool supported = false;
+    HRESULT hr = isEncoderSupported(config->encoderName, &supported);
+
+    if (FAILED(hr) || !supported) {
+        return E_NOTIMPL;
+    }
+
+    m_recordingPath = path;
+    hr = InitRecording(std::move(config));
+
+    if (SUCCEEDED(hr)) {
+        // Set up output based on encoder
+        if (m_pConfig->encoderName == AudioEncoder().opus) {
+            // Initialize Opus encoder
+            m_opusEncoder = std::make_unique<OpusAudioEncoder>();
+            if (!m_opusEncoder->Initialize(path, m_pConfig->sampleRate, 
+                                            m_pConfig->numChannels, m_pConfig->bitRate)) {
+                EndRecording();
+                return E_FAIL;
+            }
+        }
+        else if (m_pConfig->encoderName == AudioEncoder().wav || 
+                 m_pConfig->encoderName == AudioEncoder().pcm16bits) {
+            // Open WAV file
+            m_wavFile.open(path, std::ios::binary);
+            if (!m_wavFile.is_open()) {
+                EndRecording();
+                return E_FAIL;
+            }
+            m_isWavOutput = true;
+
+            // Write WAV header placeholder (will be filled in on stop)
+            char header[44] = {0};
+            m_wavFile.write(header, sizeof(header));
+        }
+    }
+
+    if (SUCCEEDED(hr)) {
+        // Start miniaudio device
+        if (ma_device_start(&m_device) != MA_SUCCESS) {
+            EndRecording();
+            return E_FAIL;
+        }
+
+        // Start encoder thread
+        m_encoderRunning = true;
+        m_encoderThread = std::thread(&Recorder::EncoderThreadFunc, this);
+
+        UpdateState(RecordState::record);
+    }
+
+    return hr;
+}
+
+HRESULT Recorder::StartStream(std::unique_ptr<RecordConfig> config) {
+    if (config->encoderName != AudioEncoder().pcm16bits) {
+        return E_NOTIMPL;
+    }
+
+    HRESULT hr = InitRecording(std::move(config));
+
+    if (SUCCEEDED(hr)) {
+        // Start miniaudio device
+        if (ma_device_start(&m_device) != MA_SUCCESS) {
+            EndRecording();
+            return E_FAIL;
+        }
+
+        // Start encoder thread (will stream PCM to Flutter)
+        m_encoderRunning = true;
+        m_encoderThread = std::thread(&Recorder::EncoderThreadFunc, this);
+
+        UpdateState(RecordState::record);
+    }
+
+    return hr;
+}
+
+HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
+    HRESULT hr = EndRecording();
+
+    m_pConfig = std::move(config);
+    m_dataWritten = 0;
+    m_amplitude = -160.0;
+    m_maxAmplitude = -160.0;
+
+    // Initialize miniaudio context if not already done
+    if (!m_contextInitialized) {
+        ma_context_config contextConfig = ma_context_config_init();
+        if (ma_context_init(NULL, 0, &contextConfig, &m_context) != MA_SUCCESS) {
+            return E_FAIL;
+        }
+        m_contextInitialized = true;
+    }
+
+    // Configure capture device
+    ma_device_config deviceConfig = ma_device_config_init(ma_device_type_capture);
+    deviceConfig.capture.format = ma_format_s16;
+    deviceConfig.capture.channels = m_pConfig->numChannels;
+    deviceConfig.sampleRate = m_pConfig->sampleRate;
+    deviceConfig.dataCallback = AudioDataCallback;
+    deviceConfig.pUserData = this;
+    deviceConfig.periodSizeInFrames = m_pConfig->sampleRate * 20 / 1000;  // 20ms buffer
+
+    // Set specific device if requested
+    if (!m_pConfig->deviceId.empty()) {
+        // Device ID is provided - we'll need to enumerate and find it
+        // For now, use default device
+        deviceConfig.capture.pDeviceID = NULL;
+    }
+
+    if (ma_device_init(&m_context, &deviceConfig, &m_device) != MA_SUCCESS) {
+        return E_FAIL;
+    }
+    m_deviceInitialized = true;
+
+    // Create ring buffer
+    m_ringBuffer = std::make_unique<RingBuffer>(RING_BUFFER_SIZE);
+
+    return S_OK;
+}
+
+HRESULT Recorder::Pause() {
+    m_isPaused = true;
+    UpdateState(RecordState::pause);
+    return S_OK;
+}
+
+HRESULT Recorder::Resume() {
+    m_isPaused = false;
+    UpdateState(RecordState::record);
+    return S_OK;
+}
+
+HRESULT Recorder::Stop() {
+    if (m_dataWritten == 0) {
+        return Cancel();
+    }
+
+    HRESULT hr = EndRecording();
+
+    if (SUCCEEDED(hr)) {
+        UpdateState(RecordState::stop);
+    }
+
+    return hr;
+}
+
+HRESULT Recorder::Cancel() {
+    auto recordingPath = GetRecordingPath();
+    HRESULT hr = EndRecording();
+
+    if (SUCCEEDED(hr)) {
+        UpdateState(RecordState::stop);
+
+        if (!recordingPath.empty()) {
+            DeleteFile(recordingPath.c_str());
+        }
+    }
+
+    return hr;
+}
+
+bool Recorder::IsPaused() {
+    return m_recordState == RecordState::pause;
+}
+
+bool Recorder::IsRecording() {
+    return m_recordState == RecordState::record;
+}
+
+HRESULT Recorder::EndRecording() {
+    AutoLock lock(m_critsec);
+
+    // Stop encoder thread
+    if (m_encoderRunning) {
+        m_encoderRunning = false;
+        if (m_encoderThread.joinable()) {
+            m_encoderThread.join();
+        }
+    }
+
+    // Stop and uninit miniaudio device
+    if (m_deviceInitialized) {
+        ma_device_stop(&m_device);
+        ma_device_uninit(&m_device);
+        m_deviceInitialized = false;
+    }
+
+    // Finalize Opus encoder
+    if (m_opusEncoder) {
+        m_opusEncoder->Finalize();
+        m_opusEncoder.reset();
+    }
+
+    // Finalize WAV file
+    if (m_isWavOutput && m_wavFile.is_open()) {
+        // Write WAV header
+        m_wavFile.seekp(0);
+        
+        // RIFF header
+        m_wavFile.write("RIFF", 4);
+        uint32_t fileSize = static_cast<uint32_t>(m_dataWritten + 36);
+        m_wavFile.write(reinterpret_cast<char*>(&fileSize), 4);
+        m_wavFile.write("WAVE", 4);
+
+        // fmt subchunk
+        m_wavFile.write("fmt ", 4);
+        uint32_t fmtSize = 16;
+        m_wavFile.write(reinterpret_cast<char*>(&fmtSize), 4);
+        uint16_t audioFormat = 1;  // PCM
+        m_wavFile.write(reinterpret_cast<char*>(&audioFormat), 2);
+        uint16_t numChannels = static_cast<uint16_t>(m_pConfig ? m_pConfig->numChannels : 1);
+        m_wavFile.write(reinterpret_cast<char*>(&numChannels), 2);
+        uint32_t sampleRate = m_pConfig ? m_pConfig->sampleRate : 48000;
+        m_wavFile.write(reinterpret_cast<char*>(&sampleRate), 4);
+        uint32_t byteRate = sampleRate * numChannels * 2;
+        m_wavFile.write(reinterpret_cast<char*>(&byteRate), 4);
+        uint16_t blockAlign = numChannels * 2;
+        m_wavFile.write(reinterpret_cast<char*>(&blockAlign), 2);
+        uint16_t bitsPerSample = 16;
+        m_wavFile.write(reinterpret_cast<char*>(&bitsPerSample), 2);
+
+        // data subchunk
+        m_wavFile.write("data", 4);
+        uint32_t dataSize = static_cast<uint32_t>(m_dataWritten);
+        m_wavFile.write(reinterpret_cast<char*>(&dataSize), 4);
+
+        m_wavFile.close();
+        m_isWavOutput = false;
+    }
+
+    // Reset ring buffer
+    m_ringBuffer.reset();
+
+    // Reset state
+    m_amplitude = -160.0;
+    m_maxAmplitude = -160.0;
+    m_isPaused = false;
+    m_pConfig.reset();
+    m_recordingPath.clear();
+
+    return S_OK;
+}
+
+HRESULT Recorder::Dispose() {
+    HRESULT hr = EndRecording();
+
+    // Uninit context
+    if (m_contextInitialized) {
+        ma_context_uninit(&m_context);
+        m_contextInitialized = false;
+    }
+
+    m_stateEventHandler = nullptr;
+    m_recordEventHandler = nullptr;
+
+    return hr;
+}
+
+void Recorder::UpdateState(RecordState state) {
+    m_recordState = state;
+
+    if (m_stateEventHandler) {
+        EventStreamHandler<>* handlerPtr = m_stateEventHandler;
+        RecordWindowsPlugin::RunOnMainThread([handlerPtr, state]() -> void {
+            if (handlerPtr) {
+                handlerPtr->Success(std::make_unique<flutter::EncodableValue>(state));
+            }
+        });
+    }
+}
+
+std::map<std::string, double> Recorder::GetAmplitude() {
+    return {
+        {"current", m_amplitude.load()},
+        {"max", m_maxAmplitude.load()},
+    };
+}
+
+void Recorder::CalculateAmplitude(const int16_t* samples, size_t count) {
+    int maxSample = 0;
+
+    for (size_t i = 0; i < count; i++) {
+        int curSample = std::abs(samples[i]);
+        if (curSample > maxSample) {
+            maxSample = curSample;
+        }
+    }
+
+    double amplitude = 20.0 * std::log10(static_cast<double>(maxSample) / 32767.0);
+    if (amplitude < -160.0) amplitude = -160.0;
+
+    m_amplitude = amplitude;
+    if (amplitude > m_maxAmplitude.load()) {
+        m_maxAmplitude = amplitude;
+    }
+}
+
+std::wstring Recorder::GetRecordingPath() {
+    return m_recordingPath;
+}
+
+HRESULT Recorder::isEncoderSupported(const std::string encoderName, bool* supported) {
+    // Only support opus, pcm16bits, and wav with the new implementation
+    if (encoderName == AudioEncoder().opus ||
+        encoderName == AudioEncoder().pcm16bits ||
+        encoderName == AudioEncoder().wav) {
+        *supported = true;
+    } else {
+        *supported = false;
+    }
+    return S_OK;
+}
+
+} // namespace record_windows

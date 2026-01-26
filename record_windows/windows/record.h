@@ -1,102 +1,99 @@
 #pragma once
 
 #include <windows.h>
-#include <mfidl.h>
-#include <mfapi.h>
-#include <mferror.h>
-#include <shlwapi.h>
-#include <Mfreadwrite.h>
+#include <string>
+#include <memory>
+#include <thread>
+#include <atomic>
+#include <vector>
+#include <map>
+#include <fstream>
 
-#include <assert.h>
-
-// utility functions
+#include "miniaudio.h"
 #include "utils.h"
-
 #include "record_config.h"
-
 #include "event_stream_handler.h"
+#include "ring_buffer.h"
+#include "opus_encoder.h"
 
 using namespace flutter;
 
-namespace record_windows
-{
-	enum RecordState {
-		pause, record, stop
-	};
+namespace record_windows {
 
-	class Recorder : public IMFSourceReaderCallback
-	{
-	public:
-		static HRESULT CreateInstance(EventStreamHandler<>* stateEventHandler, EventStreamHandler<>* recordEventHandler, Recorder** recorder);
+    enum RecordState {
+        pause, record, stop
+    };
 
-		Recorder(EventStreamHandler<>* stateEventHandler, EventStreamHandler<>* recordEventHandler);
-		virtual ~Recorder();
+    class Recorder {
+    public:
+        static HRESULT CreateInstance(EventStreamHandler<>* stateEventHandler, 
+                                       EventStreamHandler<>* recordEventHandler, 
+                                       Recorder** recorder);
 
-		HRESULT Start(std::unique_ptr<RecordConfig> config, std::wstring path);
-		HRESULT StartStream(std::unique_ptr<RecordConfig> config);
-		HRESULT Pause();
-		HRESULT Resume();
-		HRESULT Stop();
-		HRESULT Cancel();
-		bool IsPaused();
-		bool IsRecording();
-		HRESULT Dispose();
-		std::map<std::string, double> GetAmplitude();
-		std::wstring GetRecordingPath();
-		HRESULT isEncoderSupported(std::string encoderName, bool* supported);
-		
-		// IUnknown methods
-		STDMETHODIMP QueryInterface(REFIID iid, void** ppv);
-		STDMETHODIMP_(ULONG) AddRef();
-		STDMETHODIMP_(ULONG) Release();
+        Recorder(EventStreamHandler<>* stateEventHandler, EventStreamHandler<>* recordEventHandler);
+        virtual ~Recorder();
 
-		// IMFSourceReaderCallback methods
-		STDMETHODIMP OnReadSample(HRESULT hrStatus, DWORD dwStreamIndex, DWORD dwStreamFlags, LONGLONG llTimestamp, IMFSample* pSample);
-		STDMETHODIMP OnEvent(DWORD, IMFMediaEvent*);
-		STDMETHODIMP OnFlush(DWORD);
+        HRESULT Start(std::unique_ptr<RecordConfig> config, std::wstring path);
+        HRESULT StartStream(std::unique_ptr<RecordConfig> config);
+        HRESULT Pause();
+        HRESULT Resume();
+        HRESULT Stop();
+        HRESULT Cancel();
+        bool IsPaused();
+        bool IsRecording();
+        HRESULT Dispose();
+        std::map<std::string, double> GetAmplitude();
+        std::wstring GetRecordingPath();
+        HRESULT isEncoderSupported(std::string encoderName, bool* supported);
 
-	private:
-		HRESULT CreateAudioCaptureDevice(LPCWSTR pszEndPointID);
-		HRESULT CreateSourceReaderAsync();
-		HRESULT CreateSinkWriter(std::wstring path);
-		HRESULT CreateAudioProfileIn( IMFMediaType** ppMediaType);
-		HRESULT CreateAudioProfileOut( IMFMediaType** ppMediaType);
+    private:
+        // Miniaudio callback - called from audio thread
+        static void AudioDataCallback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);
+        void OnAudioData(const void* pInput, ma_uint32 frameCount);
 
-		HRESULT CreateACCProfile( IMFMediaType* pMediaType);
-		HRESULT CreateFlacProfile( IMFMediaType* pMediaType);
-		HRESULT CreateAmrNbProfile( IMFMediaType* pMediaType);
-		HRESULT CreatePcmProfile( IMFMediaType* pMediaType);
-		HRESULT FillWavHeader();
+        // Encoder thread function
+        void EncoderThreadFunc();
 
-		HRESULT InitRecording(std::unique_ptr<RecordConfig> config);
-		void UpdateState(RecordState state);
-		HRESULT EndRecording();
-		void GetAmplitude(BYTE* chunk, DWORD size, int bytesPerSample);
-		std::vector<int16_t> convertBytesToInt16(BYTE* bytes, DWORD size);
+        HRESULT InitRecording(std::unique_ptr<RecordConfig> config);
+        HRESULT EndRecording();
+        void UpdateState(RecordState state);
+        void CalculateAmplitude(const int16_t* samples, size_t count);
 
-		long                m_nRefCount;        // Reference count.
-		CritSec				m_critsec;
+        // Thread synchronization
+        CritSec m_critsec;
 
-		IMFMediaSource* m_pSource;
-		IMFPresentationDescriptor* m_pPresentationDescriptor;
-		IMFSourceReader* m_pReader;
-		IMFSinkWriter* m_pWriter;
-		std::wstring m_recordingPath;
-		bool m_mfStarted = false;
-		IMFMediaType* m_pMediaType;
+        // Miniaudio
+        ma_context m_context;
+        ma_device m_device;
+        bool m_contextInitialized = false;
+        bool m_deviceInitialized = false;
 
-		bool m_bFirstSample = true;
-		LONGLONG m_llBaseTime = 0;
-		LONGLONG m_llLastTime = 0;
+        // Ring buffer for audio data
+        std::unique_ptr<RingBuffer> m_ringBuffer;
 
-		double m_amplitude = -160;
-		double m_maxAmplitude = -160;
-		DWORD m_dataWritten = 0;
+        // Encoder
+        std::unique_ptr<OpusAudioEncoder> m_opusEncoder;
+        std::thread m_encoderThread;
+        std::atomic<bool> m_encoderRunning{false};
 
-		EventStreamHandler<>* m_stateEventHandler;
-		EventStreamHandler<>* m_recordEventHandler;
+        // WAV file output (for pcm16bits/wav encoder)
+        std::ofstream m_wavFile;
+        bool m_isWavOutput = false;
 
-		RecordState m_recordState = RecordState::stop;
-		std::unique_ptr<RecordConfig> m_pConfig;
-	};
-};
+        // Recording state
+        std::wstring m_recordingPath;
+        std::unique_ptr<RecordConfig> m_pConfig;
+        RecordState m_recordState = RecordState::stop;
+        std::atomic<bool> m_isPaused{false};
+
+        // Amplitude tracking
+        std::atomic<double> m_amplitude{-160.0};
+        std::atomic<double> m_maxAmplitude{-160.0};
+        size_t m_dataWritten = 0;
+
+        // Event handlers
+        EventStreamHandler<>* m_stateEventHandler;
+        EventStreamHandler<>* m_recordEventHandler;
+    };
+
+} // namespace record_windows

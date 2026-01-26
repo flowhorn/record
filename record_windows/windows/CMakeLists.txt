@@ -6,11 +6,32 @@ cmake_minimum_required(VERSION 3.23)
 
 # Project-level configuration.
 set(PROJECT_NAME "record_windows")
-project(${PROJECT_NAME} LANGUAGES CXX)
+project(${PROJECT_NAME} LANGUAGES CXX C)
 
 # This value is used when generating builds using this plugin, so it must
 # not be changed
 set(PLUGIN_NAME "record_windows_plugin")
+
+# Fetch opus and ogg from GitHub
+include(FetchContent)
+
+FetchContent_Declare(
+  ogg
+  GIT_REPOSITORY https://github.com/xiph/ogg.git
+  GIT_TAG v1.3.5
+)
+
+FetchContent_Declare(
+  opus
+  GIT_REPOSITORY https://github.com/xiph/opus.git
+  GIT_TAG v1.4
+)
+
+# Configure ogg build options
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(INSTALL_DOCS OFF CACHE BOOL "" FORCE)
+
+FetchContent_MakeAvailable(ogg opus)
 
 # Any new source files that you add to the plugin should be added here.
 list(APPEND PLUGIN_SOURCES
@@ -19,9 +40,9 @@ list(APPEND PLUGIN_SOURCES
   "record_config.h"
   "record.h"
   "record.cpp"
-  "record_readercallback.cpp"
-  "record_iunknown.cpp"
-  "record_mediatype.cpp"
+  "ring_buffer.h"
+  "opus_encoder.h"
+  "opus_encoder.cpp"
   "utils.h"
   "event_stream_handler.h"
 )
@@ -34,7 +55,16 @@ add_library(${PLUGIN_NAME} SHARED
   ${PLUGIN_SOURCES}
 )
 
-set(wmf_libs dxva2.lib evr.lib mf.lib mfplat.lib mfplay.lib mfreadwrite.lib mfuuid.lib Shlwapi.lib)
+# Define MINIAUDIO_IMPLEMENTATION in one source file
+target_compile_definitions(${PLUGIN_NAME} PRIVATE
+  MINIAUDIO_IMPLEMENTATION
+  MA_NO_DECODING
+  MA_NO_ENCODING
+  MA_NO_GENERATION
+  MA_NO_ENGINE
+  MA_NO_NODE_GRAPH
+  MA_NO_RESOURCE_MANAGER
+)
 
 # Apply a standard set of build settings that are configured in the
 # application-level CMakeLists.txt. This can be removed for plugins that want
@@ -53,9 +83,14 @@ target_compile_definitions(${PLUGIN_NAME} PRIVATE FLUTTER_PLUGIN_IMPL)
 target_include_directories(${PLUGIN_NAME} INTERFACE
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
-target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin ${wmf_libs})
+target_include_directories(${PLUGIN_NAME} PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/include"
+  "${ogg_SOURCE_DIR}/include"
+  "${ogg_BINARY_DIR}/include"
+  "${opus_SOURCE_DIR}/include"
+)
 
-
+target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin ogg opus)
 
 # List of absolute paths to libraries that should be bundled with the plugin.
 # This list could contain prebuilt libraries, or libraries created by an
