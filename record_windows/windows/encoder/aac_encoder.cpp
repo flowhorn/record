@@ -118,6 +118,18 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
         hr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, m_channels);
         if (FAILED(hr)) std::cerr << "SetUINT32 Channels In failed: " << hr << std::endl;
     }
+
+    // PCM requires Block Alignment and Avg Bytes/Sec for strict definition
+    if (SUCCEEDED(hr)) {
+        UINT32 blockAlign = m_channels * 2; // 16 bits = 2 bytes
+        hr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, blockAlign);
+        if (FAILED(hr)) std::cerr << "SetUINT32 BlockAlignment In failed: " << hr << std::endl;
+        
+        if (SUCCEEDED(hr)) {
+            hr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, m_sampleRate * blockAlign);
+            if (FAILED(hr)) std::cerr << "SetUINT32 AvgBytesPerSecond In failed: " << hr << std::endl;
+        }
+    }
     
     // Often required for strict topology building
     if (SUCCEEDED(hr) && m_channels > 0 && m_channels <= 2) {
