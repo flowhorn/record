@@ -6,6 +6,8 @@ cmake_minimum_required(VERSION 3.23)
 
 # Allow old cmake_minimum_required from dependencies (ogg uses an old version)
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+# Suppress deprecation warnings from subprojects
+set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS ON CACHE BOOL "" FORCE)
 
 # Project-level configuration.
 set(PROJECT_NAME "record_windows")
