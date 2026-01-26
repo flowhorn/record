@@ -58,8 +58,7 @@ void Recorder::OnAudioData(const void* pInput, ma_uint32 frameCount) {
 
     if (m_dataConverterInitialized) {
         ma_uint64 inFrames = frameCount;
-        outFrames = ma_data_converter_get_expected_output_frame_count(&m_dataConverter, inFrames);
-        if (outFrames == 0) {
+        if (ma_data_converter_get_expected_output_frame_count(&m_dataConverter, inFrames, &outFrames) != MA_SUCCESS || outFrames == 0) {
             return;
         }
 
