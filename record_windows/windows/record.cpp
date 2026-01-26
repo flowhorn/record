@@ -214,23 +214,11 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
         m_contextInitialized = true;
     }
 
-    // Configure capture device
-    ma_device_config deviceConfig = ma_device_config_init(ma_device_type_capture);
-    deviceConfig.capture.format = ma_format_s16;
-    deviceConfig.capture.channels = m_pConfig->numChannels;
-    deviceConfig.sampleRate = m_pConfig->sampleRate;
-    deviceConfig.dataCallback = AudioDataCallback;
-    deviceConfig.pUserData = this;
-    
-    // Low latency settings
-    deviceConfig.performanceProfile = ma_performance_profile_low_latency;
-    deviceConfig.periodSizeInFrames = 0; // Let WASAPI decide optimal buffer size
-    deviceConfig.wasapi.noHardwareOffloading = MA_TRUE; 
-    
-    // We still calculate our ring buffer based on ~100ms, but native buffer will be smaller
-    // deviceConfig.periodSizeInFrames = m_pConfig->sampleRate * 20 / 1000;  // REMOVED fixed 20ms buffer
+    // Capture Device ID negotiation
+    ma_device_id selectedDeviceID;
+    bool hasSelectedDevice = false;
 
-    // Set specific device if requested
+    // Resolve device ID if requested
     if (!m_pConfig->deviceId.empty()) {
         try {
             int deviceIndex = std::stoi(m_pConfig->deviceId);
@@ -242,8 +230,9 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
             
             if (ma_context_get_devices(&m_context, &pPlaybackDeviceInfos, &playbackDeviceCount, &pCaptureDeviceInfos, &captureDeviceCount) == MA_SUCCESS) {
                 if (deviceIndex >= 0 && deviceIndex < (int)captureDeviceCount) {
-                    deviceConfig.capture.pDeviceID = &pCaptureDeviceInfos[deviceIndex].id;
-                    std::cout << "Record: Selected device index " << deviceIndex << ": " << pCaptureDeviceInfos[deviceIndex].name << std::endl;
+                    selectedDeviceID = pCaptureDeviceInfos[deviceIndex].id;
+                    hasSelectedDevice = true;
+                    std::cout << "Record: Resolved device index " << deviceIndex << " to ID." << std::endl;
                 } else {
                     std::cerr << "Record: Device index " << deviceIndex << " out of range (count=" << captureDeviceCount << ")" << std::endl;
                 }
@@ -255,28 +244,40 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
         }
     }
 
+    // Attempt 1: Strict Low Latency
+    ma_device_config deviceConfig = ma_device_config_init(ma_device_type_capture);
+    deviceConfig.capture.format = ma_format_s16;
+    deviceConfig.capture.channels = m_pConfig->numChannels;
+    deviceConfig.sampleRate = m_pConfig->sampleRate;
+    deviceConfig.dataCallback = AudioDataCallback;
+    deviceConfig.pUserData = this;
+    deviceConfig.performanceProfile = ma_performance_profile_low_latency;
+    deviceConfig.periodSizeInFrames = 0; 
+    deviceConfig.wasapi.noHardwareOffloading = MA_TRUE; 
+    
+    if (hasSelectedDevice) {
+        deviceConfig.capture.pDeviceID = &selectedDeviceID;
+    }
+
     ma_result initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
     
-    // If strict low latency fails (likely due to format mismatch), retry with default profile
-    if (initResult == MA_FORMAT_NOT_SUPPORTED) {
-        std::cerr << "Record: Strict low latency failed (Format not supported). Retrying with default profile and native sample rate." << std::endl;
+    // Attempt 2: Compatibility Fallback
+    if (initResult != MA_SUCCESS) {
+        std::cerr << "Record: Strict init failed (" << initResult << "). Retrying with compatibility defaults." << std::endl;
         
-        // Reset config to defaults but keep callback/data
+        // Clean reset of config
+        deviceConfig = ma_device_config_init(ma_device_type_capture);
+        deviceConfig.capture.format = ma_format_s16; // We need S16 for our callback logic
+        deviceConfig.capture.channels = 0; // Allow native channels (will update config later)
+        deviceConfig.sampleRate = 0;       // Allow native rate (will update config later)
+        deviceConfig.dataCallback = AudioDataCallback;
+        deviceConfig.pUserData = this;
         deviceConfig.performanceProfile = ma_performance_profile_conservative;
-        deviceConfig.periodSizeInFrames = 0;
-        deviceConfig.sampleRate = 0; // Let backend choose valid rate (we'll resample if needed or just use what we get)
+        
+        if (hasSelectedDevice) {
+            deviceConfig.capture.pDeviceID = &selectedDeviceID;
+        }
 
-        
-        // If the user *really* wanted a specific rate, miniaudio converter *should* kick in if we don't disable it.
-        // But for safety, let's try 0 sample rate and just use what the device gives us. 
-        // Note: usage of ring buffer assumes we push data in format we agreed on.
-        // Actually, if we set sampleRate=0, miniaudio picks device native. 
-        // But our Encoder expects `m_pConfig->sampleRate`. 
-        // We really want miniaudio to CONVERT for us.
-        
-        // Try again with default profile, requesting the SAME sample rate (hoping converter works in default mode)
-        // Try again with default profile, allowing native rate
-        deviceConfig.sampleRate = 0; 
         initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
     }
 
@@ -286,14 +287,24 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
     }
     m_deviceInitialized = true;
     
-    // Update config with actual sample rate/channels chosen by miniaudio
-    // This ensures encoders use the correct rate (e.g. if device is 48k but we asked for 44.1k and got 48k)
-    // Note: If miniaudio is converting, m_device.sampleRate might be the *device* rate or *internal* rate.
-    // Ideally we want the rate we are receiving in the callback.
-    // Since we set sampleRate=0 in retry, we are getting native rate.
+    // Update config with actual negotiated parameters
+    // This ensures encoders are initialized with the correct format (e.g. 48k vs 44.1k)
+    bool configChanged = false;
+    
     if ((ma_uint32)m_pConfig->sampleRate != m_device.sampleRate) {
         std::cout << "Record: Sample rate corrected from " << m_pConfig->sampleRate << " to " << m_device.sampleRate << std::endl;
         m_pConfig->sampleRate = (int)m_device.sampleRate;
+        configChanged = true;
+    }
+    
+    if ((ma_uint32)m_pConfig->numChannels != m_device.capture.channels) {
+        std::cout << "Record: Channel count corrected from " << m_pConfig->numChannels << " to " << m_device.capture.channels << std::endl;
+        m_pConfig->numChannels = (int)m_device.capture.channels;
+        configChanged = true;
+    }
+    
+    if (configChanged) {
+        std::cout << "Record: Final Config -> Rate: " << m_pConfig->sampleRate << ", Channels: " << m_pConfig->numChannels << std::endl;
     }
 
     // Create ring buffer
