@@ -79,6 +79,10 @@ namespace record_windows {
         // Ring buffer for audio data
         std::unique_ptr<RingBuffer> m_ringBuffer;
 
+        // Capture format and conversion buffer
+        ma_format m_captureFormat = ma_format_s16;
+        std::vector<int16_t> m_convertBuffer;
+
         // Encoder
         std::unique_ptr<OpusAudioEncoder> m_opusEncoder;
         std::unique_ptr<AacEncoder> m_aacEncoder;

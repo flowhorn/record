@@ -5,6 +5,8 @@
 #include "miniaudio.h"
 
 #include <iostream>
+#include <algorithm>
+#include <cmath>
 
 namespace record_windows {
 
@@ -47,8 +49,43 @@ void Recorder::OnAudioData(const void* pInput, ma_uint32 frameCount) {
         return;
     }
 
-    const int16_t* samples = static_cast<const int16_t*>(pInput);
-    size_t byteCount = frameCount * sizeof(int16_t) * m_pConfig->numChannels;
+    if (!pInput || !m_pConfig) {
+        return;
+    }
+
+    const size_t sampleCount = frameCount * m_pConfig->numChannels;
+    const int16_t* samples = nullptr;
+
+    if (m_captureFormat == ma_format_s16) {
+        samples = static_cast<const int16_t*>(pInput);
+    } else {
+        m_convertBuffer.resize(sampleCount);
+        if (m_captureFormat == ma_format_f32) {
+            const float* input = static_cast<const float*>(pInput);
+            for (size_t i = 0; i < sampleCount; ++i) {
+                float clamped = std::max(-1.0f, std::min(1.0f, input[i]));
+                m_convertBuffer[i] = static_cast<int16_t>(std::lrintf(clamped * 32767.0f));
+            }
+        } else if (m_captureFormat == ma_format_s32) {
+            const int32_t* input = static_cast<const int32_t*>(pInput);
+            for (size_t i = 0; i < sampleCount; ++i) {
+                int32_t v = input[i];
+                float scaled = static_cast<float>(v) / 2147483647.0f;
+                scaled = std::max(-1.0f, std::min(1.0f, scaled));
+                m_convertBuffer[i] = static_cast<int16_t>(std::lrintf(scaled * 32767.0f));
+            }
+        } else if (m_captureFormat == ma_format_u8) {
+            const uint8_t* input = static_cast<const uint8_t*>(pInput);
+            for (size_t i = 0; i < sampleCount; ++i) {
+                m_convertBuffer[i] = static_cast<int16_t>((static_cast<int>(input[i]) - 128) << 8);
+            }
+        } else {
+            return;
+        }
+        samples = m_convertBuffer.data();
+    }
+
+    size_t byteCount = sampleCount * sizeof(int16_t);
 
     // Calculate amplitude
     CalculateAmplitude(samples, frameCount * m_pConfig->numChannels);
@@ -294,6 +331,25 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
         }
 
         ma_result initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
+
+        if (initResult != MA_SUCCESS && hasSelectedDevice) {
+            std::cerr << "Record: Strict init failed for selected device (" << initResult << "). Retrying with default device." << std::endl;
+            deviceConfig.capture.pDeviceID = NULL;
+            initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
+        }
+
+        if (initResult != MA_SUCCESS) {
+            deviceConfig.capture.format = ma_format_f32;
+            if (hasSelectedDevice) {
+                deviceConfig.capture.pDeviceID = &selectedDeviceID;
+            }
+            initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
+            if (initResult != MA_SUCCESS && hasSelectedDevice) {
+                std::cerr << "Record: Strict f32 init failed for selected device (" << initResult << "). Retrying with default device." << std::endl;
+                deviceConfig.capture.pDeviceID = NULL;
+                initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
+            }
+        }
         
         // Attempt 2: Compatibility Fallback
         if (initResult != MA_SUCCESS) {
@@ -317,12 +373,58 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
             }
 
             initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
+            if (initResult != MA_SUCCESS && hasSelectedDevice) {
+                std::cerr << "Record: Compatibility init failed for selected device (" << initResult << "). Retrying with default device." << std::endl;
+                deviceConfig.capture.pDeviceID = NULL;
+                initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
+            }
+
+            if (initResult != MA_SUCCESS) {
+                deviceConfig.capture.format = ma_format_f32;
+                if (hasSelectedDevice) {
+                    deviceConfig.capture.pDeviceID = &selectedDeviceID;
+                }
+                initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
+                if (initResult != MA_SUCCESS && hasSelectedDevice) {
+                    std::cerr << "Record: Compatibility f32 init failed for selected device (" << initResult << "). Retrying with default device." << std::endl;
+                    deviceConfig.capture.pDeviceID = NULL;
+                    initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
+                }
+            }
+        }
+
+        if (initResult != MA_SUCCESS && hasSelectedDevice) {
+            ma_device_info deviceInfo;
+            if (ma_context_get_device_info(&m_context, ma_device_type_capture, &selectedDeviceID, &deviceInfo) == MA_SUCCESS) {
+                std::cerr << "Record: Probing supported formats for selected device..." << std::endl;
+                for (ma_uint32 i = 0; i < deviceInfo.nativeDataFormatCount; ++i) {
+                    auto fmt = deviceInfo.nativeDataFormats[i];
+                    if (fmt.format != ma_format_s16 && fmt.format != ma_format_f32 && fmt.format != ma_format_s32 && fmt.format != ma_format_u8) {
+                        continue;
+                    }
+
+                    deviceConfig = ma_device_config_init(ma_device_type_capture);
+                    deviceConfig.capture.format = fmt.format;
+                    deviceConfig.capture.channels = (fmt.channels > 0) ? fmt.channels : m_pConfig->numChannels;
+                    deviceConfig.sampleRate = (fmt.sampleRate > 0) ? fmt.sampleRate : m_pConfig->sampleRate;
+                    deviceConfig.dataCallback = AudioDataCallback;
+                    deviceConfig.pUserData = this;
+                    deviceConfig.performanceProfile = ma_performance_profile_conservative;
+                    deviceConfig.capture.pDeviceID = &selectedDeviceID;
+
+                    initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
+                    if (initResult == MA_SUCCESS) {
+                        break;
+                    }
+                }
+            }
         }
 
         if (initResult != MA_SUCCESS) {
             std::cerr << "Record: Failed to initialize device. Result=" << initResult << " (" << ma_result_description(initResult) << ")" << std::endl;
             return E_FAIL;
         }
+        m_captureFormat = deviceConfig.capture.format;
         m_deviceInitialized = true;
     }
     
