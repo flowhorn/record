@@ -457,7 +457,9 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
             deviceConfig = ma_device_config_init(ma_device_type_capture);
             deviceConfig.capture.format = ma_format_s16; // We need S16 for our callback logic
             deviceConfig.capture.channels = 0; // Allow native channels (will update config later)
-            if (m_pConfig && m_pConfig->encoderName == AudioEncoder().aacLc) {
+            if (!hasSelectedDevice) {
+                deviceConfig.sampleRate = 0;   // Allow native rate for default device
+            } else if (m_pConfig && m_pConfig->encoderName == AudioEncoder().aacLc) {
                 deviceConfig.sampleRate = m_pConfig->sampleRate;
             } else {
                 deviceConfig.sampleRate = 0;   // Allow native rate (will update config later)
@@ -542,6 +544,26 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
                         break;
                     }
                 }
+            } else {
+                std::cerr << "Record: Failed to query default device native formats." << std::endl;
+            }
+        }
+
+        if (initResult != MA_SUCCESS) {
+            deviceConfig = ma_device_config_init(ma_device_type_capture);
+            deviceConfig.capture.format = ma_format_unknown;
+            deviceConfig.capture.channels = 0;
+            deviceConfig.sampleRate = 0;
+            deviceConfig.dataCallback = AudioDataCallback;
+            deviceConfig.pUserData = this;
+            deviceConfig.performanceProfile = ma_performance_profile_conservative;
+            deviceConfig.capture.pDeviceID = hasSelectedDevice ? &selectedDeviceID : NULL;
+
+            initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
+            if (initResult != MA_SUCCESS && hasSelectedDevice) {
+                std::cerr << "Record: Unknown-format init failed for selected device (" << initResult << "). Retrying with default device." << std::endl;
+                deviceConfig.capture.pDeviceID = NULL;
+                initResult = ma_device_init(&m_context, &deviceConfig, &m_device);
             }
         }
 
