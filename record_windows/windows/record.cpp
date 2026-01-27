@@ -196,21 +196,27 @@ void Recorder::EncoderThreadFunc() {
             }
         }
 
+        // If stop requested and no data available, exit immediately
+        if (targetBytes == 0 && m_stopRequested.load(std::memory_order_relaxed) && available == 0) {
+            break;
+        }
+
         if (targetBytes == 0) {
             std::unique_lock<std::mutex> lock(m_dataMutex);
             m_dataCondition.wait_for(lock, std::chrono::milliseconds(10), [&]() {
-                if (!m_encoderRunning.load(std::memory_order_relaxed) && !m_stopRequested.load(std::memory_order_relaxed)) {
-                    return true;
+                // Exit wait if we're shutting down and buffer is empty
+                if (!m_encoderRunning.load(std::memory_order_relaxed)) {
+                    return true;  // Always wake up when not running to check exit conditions
                 }
                 if (!m_ringBuffer) {
-                    return false;
+                    return true;  // No buffer means we should exit
                 }
                 size_t avail = m_ringBuffer->Available();
                 if (allowPartialFrames) {
                     return avail >= bytesPerSampleFrame;
                 }
                 if (m_stopRequested.load(std::memory_order_relaxed)) {
-                    return avail >= bytesPerSampleFrame;
+                    return avail >= bytesPerSampleFrame || avail == 0;
                 }
                 return avail >= bytesPerFrame;
             });
