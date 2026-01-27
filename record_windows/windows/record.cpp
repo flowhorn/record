@@ -11,8 +11,8 @@
 namespace record_windows {
 
 // Low-latency tuning
-static const int kNonAacFrameMs = 10;      // 10ms frames for non-AAC encoders
-static const int kRingBufferMs = 40;       // Target ring buffer size
+static const int kNonAacFrameMs = 10;      // 10ms frames for non-AAC encoders (lower may cause stability issues)
+static const int kRingBufferMs = 100;      // Ring buffer size - larger to handle encoder startup without loss
 
 // static
 HRESULT Recorder::CreateInstance(EventStreamHandler<>* stateEventHandler, 
@@ -91,6 +91,7 @@ void Recorder::WarmUpAsync() {
             deviceConfig.wasapi.noHardwareOffloading = MA_TRUE;
             deviceConfig.wasapi.noAutoConvertSRC = MA_TRUE;
             deviceConfig.wasapi.noAutoStreamRouting = MA_TRUE;
+            deviceConfig.wasapi.usage = ma_wasapi_usage_pro_audio;  // Request pro audio mode for lowest latency
 
             if (ma_device_init(&m_context, &deviceConfig, &warmDevice) == MA_SUCCESS) {
                 ma_device_start(&warmDevice);
@@ -555,6 +556,7 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
         deviceConfig.wasapi.noHardwareOffloading = MA_TRUE; 
         deviceConfig.wasapi.noAutoConvertSRC = MA_TRUE;
         deviceConfig.wasapi.noAutoStreamRouting = MA_TRUE;
+        deviceConfig.wasapi.usage = ma_wasapi_usage_pro_audio;  // Request pro audio mode for lowest latency
         
         if (hasSelectedDevice) {
             deviceConfig.capture.pDeviceID = &selectedDeviceID;
