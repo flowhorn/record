@@ -119,6 +119,10 @@ namespace record_windows {
         std::atomic<double> m_maxAmplitude{-160.0};
         size_t m_dataWritten = 0;
 
+        // Diagnostic: track first audio callback
+        std::atomic<bool> m_firstCallbackLogged{false};
+        std::chrono::steady_clock::time_point m_recordingStartTime;
+
         // Event handlers
         EventStreamHandler<>* m_stateEventHandler;
         EventStreamHandler<>* m_recordEventHandler;

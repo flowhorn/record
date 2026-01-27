@@ -95,10 +95,11 @@ void Recorder::WarmUpAsync() {
 
             if (ma_device_init(&m_context, &deviceConfig, &warmDevice) == MA_SUCCESS) {
                 ma_device_start(&warmDevice);
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                // Run for 300ms to fully prime Windows audio stack (WASAPI can have significant startup latency)
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
                 ma_device_stop(&warmDevice);
                 ma_device_uninit(&warmDevice);
-                std::cout << "Record: Temporary capture device primed successfully." << std::endl;
+                std::cout << "Record: Temporary capture device primed successfully (300ms)." << std::endl;
             } else {
                 std::cout << "Record: Failed to initialize temporary capture device (non-critical)." << std::endl;
             }
@@ -127,6 +128,13 @@ void Recorder::OnAudioData(const void* pInput, ma_uint32 frameCount) {
 
     if (!pInput || !m_pConfig) {
         return;
+    }
+
+    // Diagnostic: log first callback timing
+    if (!m_firstCallbackLogged.exchange(true, std::memory_order_relaxed)) {
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_recordingStartTime).count();
+        std::cout << "Record: First audio callback received after " << elapsed << "ms" << std::endl;
     }
 
     const int16_t* samples = nullptr;
@@ -306,12 +314,26 @@ HRESULT Recorder::Start(std::unique_ptr<RecordConfig> config, std::wstring path)
     m_stopRequested = false;
 
     if (SUCCEEDED(hr)) {
-        // Set up output based on encoder
+        // Reset diagnostic tracking
+        m_firstCallbackLogged = false;
+        m_recordingStartTime = std::chrono::steady_clock::now();
+
+        // Start miniaudio device FIRST - audio immediately goes to ring buffer
+        // This ensures zero audio loss while encoder initializes
+        if (ma_device_start(&m_device) != MA_SUCCESS) {
+            EndRecording();
+            UninitDevice();
+            return E_FAIL;
+        }
+        std::cout << "Record: Device started, audio capture active." << std::endl;
+
+        // Set up output based on encoder (while audio is already being captured)
         if (m_pConfig->encoderName == AudioEncoder().aacLc) {
             // Initialize AAC encoder
             m_aacEncoder = std::make_unique<AacEncoder>();
             if (!m_aacEncoder->Initialize(path, m_pConfig->sampleRate, 
                                            m_pConfig->numChannels, m_pConfig->bitRate)) {
+                ma_device_stop(&m_device);
                 EndRecording();
                 return E_FAIL;
             }
@@ -321,6 +343,7 @@ HRESULT Recorder::Start(std::unique_ptr<RecordConfig> config, std::wstring path)
             // Open WAV file
             m_wavFile.open(path, std::ios::binary);
             if (!m_wavFile.is_open()) {
+                ma_device_stop(&m_device);
                 EndRecording();
                 return E_FAIL;
             }
@@ -330,17 +353,8 @@ HRESULT Recorder::Start(std::unique_ptr<RecordConfig> config, std::wstring path)
             char header[44] = {0};
             m_wavFile.write(header, sizeof(header));
         }
-    }
 
-    if (SUCCEEDED(hr)) {
-        // Start miniaudio device
-        if (ma_device_start(&m_device) != MA_SUCCESS) {
-            EndRecording();
-            UninitDevice();
-            return E_FAIL;
-        }
-
-        // Start encoder thread
+        // Start encoder thread - it will immediately process buffered audio
         m_encoderRunning = true;
         m_encoderThread = std::thread(&Recorder::EncoderThreadFunc, this);
 
@@ -359,6 +373,10 @@ HRESULT Recorder::StartStream(std::unique_ptr<RecordConfig> config) {
     m_stopRequested = false;
 
     if (SUCCEEDED(hr)) {
+        // Reset diagnostic tracking
+        m_firstCallbackLogged = false;
+        m_recordingStartTime = std::chrono::steady_clock::now();
+
         // Start miniaudio device
         if (ma_device_start(&m_device) != MA_SUCCESS) {
             EndRecording();
