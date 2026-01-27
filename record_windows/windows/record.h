@@ -121,6 +121,7 @@ namespace record_windows {
 
         // Diagnostic: track first audio callback
         std::atomic<bool> m_firstCallbackLogged{false};
+        std::atomic<bool> m_firstNonSilentLogged{false};
         std::chrono::steady_clock::time_point m_recordingStartTime;
 
         // Event handlers

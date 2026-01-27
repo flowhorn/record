@@ -131,10 +131,42 @@ void Recorder::OnAudioData(const void* pInput, ma_uint32 frameCount) {
     }
 
     // Diagnostic: log first callback timing
+    auto callbackTime = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(callbackTime - m_recordingStartTime).count();
+    
     if (!m_firstCallbackLogged.exchange(true, std::memory_order_relaxed)) {
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_recordingStartTime).count();
         std::cout << "Record: First audio callback received after " << elapsed << "ms" << std::endl;
+    }
+    
+    // Check if the audio data contains actual signal (not silence)
+    // Look at first few samples to detect non-zero data
+    if (!m_firstNonSilentLogged.load(std::memory_order_relaxed)) {
+        bool hasSignal = false;
+        const int16_t silenceThreshold = 100;  // Very low threshold to detect any signal
+        
+        if (m_captureFormat == ma_format_s16) {
+            const int16_t* input = static_cast<const int16_t*>(pInput);
+            for (ma_uint32 i = 0; i < std::min(frameCount * m_pConfig->numChannels, (ma_uint32)64); ++i) {
+                if (std::abs(input[i]) > silenceThreshold) {
+                    hasSignal = true;
+                    break;
+                }
+            }
+        } else if (m_captureFormat == ma_format_f32) {
+            const float* input = static_cast<const float*>(pInput);
+            const float fThreshold = silenceThreshold / 32767.0f;
+            for (ma_uint32 i = 0; i < std::min(frameCount * m_pConfig->numChannels, (ma_uint32)64); ++i) {
+                if (std::abs(input[i]) > fThreshold) {
+                    hasSignal = true;
+                    break;
+                }
+            }
+        }
+        
+        if (hasSignal) {
+            m_firstNonSilentLogged.store(true, std::memory_order_relaxed);
+            std::cout << "Record: First non-silent audio data after " << elapsed << "ms" << std::endl;
+        }
     }
 
     const int16_t* samples = nullptr;
@@ -316,6 +348,7 @@ HRESULT Recorder::Start(std::unique_ptr<RecordConfig> config, std::wstring path)
     if (SUCCEEDED(hr)) {
         // Reset diagnostic tracking
         m_firstCallbackLogged = false;
+        m_firstNonSilentLogged = false;
         m_recordingStartTime = std::chrono::steady_clock::now();
 
         // Start miniaudio device FIRST - audio immediately goes to ring buffer
@@ -375,6 +408,7 @@ HRESULT Recorder::StartStream(std::unique_ptr<RecordConfig> config) {
     if (SUCCEEDED(hr)) {
         // Reset diagnostic tracking
         m_firstCallbackLogged = false;
+        m_firstNonSilentLogged = false;
         m_recordingStartTime = std::chrono::steady_clock::now();
 
         // Start miniaudio device
