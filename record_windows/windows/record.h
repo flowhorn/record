@@ -61,7 +61,7 @@ namespace record_windows {
         void UpdateState(RecordState state);
         void CalculateAmplitude(const int16_t* samples, size_t count);
         void UninitDevice();
-        void WarmUp();
+        void WarmUpAsync();
 
         // Thread synchronization
         CritSec m_critsec;
@@ -73,6 +73,7 @@ namespace record_windows {
 
         bool m_deviceInitialized = false;
         bool m_warmedUp = false;
+        std::atomic<bool> m_warmingUp{false};
 
         // Cached device config for reuse
         std::string m_lastDeviceId;
