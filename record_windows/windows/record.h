@@ -48,6 +48,11 @@ namespace record_windows {
         std::wstring GetRecordingPath();
         HRESULT isEncoderSupported(std::string encoderName, bool* supported);
 
+        // Continuous capture methods - keeps microphone open for seamless recording
+        HRESULT EnableContinuousCapture(std::unique_ptr<RecordConfig> config);
+        HRESULT DisableContinuousCapture();
+        bool IsContinuousCaptureEnabled() const;
+
     private:
         // Miniaudio callback - called from audio thread
         static void AudioDataCallback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);
@@ -79,6 +84,10 @@ namespace record_windows {
         std::string m_lastDeviceId;
         int m_lastSampleRate = 0;
         int m_lastNumChannels = 0;
+
+        // Continuous capture state
+        std::atomic<bool> m_continuousCaptureEnabled{false};
+        std::unique_ptr<RecordConfig> m_continuousCaptureConfig;
 
         // Ring buffer for audio data
         std::unique_ptr<RingBuffer> m_ringBuffer;

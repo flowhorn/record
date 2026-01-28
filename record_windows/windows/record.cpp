@@ -126,7 +126,12 @@ void Recorder::OnAudioData(const void* pInput, ma_uint32 frameCount) {
         return;
     }
 
-    if (!pInput || !m_pConfig) {
+    if (!pInput) {
+        return;
+    }
+
+    AutoLock lock(m_critsec);
+    if (!m_pConfig) {
         return;
     }
 
@@ -429,12 +434,55 @@ HRESULT Recorder::StartStream(std::unique_ptr<RecordConfig> config) {
 }
 
 HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
-    EndRecording();
+    // Check if we can reuse the existing initialized device
+    bool reuseDevice = false;
+    {
+        AutoLock lock(m_critsec);
+        if (m_deviceInitialized && m_pConfig) {
+            if (m_lastDeviceId == config->deviceId &&
+                m_lastNumChannels == config->numChannels &&
+                m_lastSampleRate == config->sampleRate) {
+                reuseDevice = true;
+            }
+        }
+    }
 
-    m_pConfig = std::move(config);
-    m_dataWritten = 0;
-    m_amplitude = -160.0;
-    m_maxAmplitude = -160.0;
+    // Only call EndRecording if we aren't reusing the device or if it's not a continuous capture transition
+    if (!reuseDevice) {
+        EndRecording();
+    } else {
+        {
+            AutoLock lock(m_critsec);
+            // If reusing, we still need to clean up the encoder/file parts but KEEP the device/buffer
+            m_stopRequested = true;
+            m_encoderRunning = false;
+            m_dataCondition.notify_all();
+        }
+        // JOIN THREAD WITHOUT LOCK to avoid deadlock
+        if (m_encoderThread.joinable()) {
+            m_encoderThread.join();
+        }
+        
+        AutoLock lock(m_critsec);
+        if (m_aacEncoder) {
+            m_aacEncoder->Finalize();
+            m_aacEncoder.reset();
+        }
+        if (m_isWavOutput && m_wavFile.is_open()) {
+            m_wavFile.close();
+            m_isWavOutput = false;
+        }
+        m_stopRequested = false;
+        m_recordingPath.clear();
+    }
+
+    {
+        AutoLock lock(m_critsec);
+        m_pConfig = std::move(config);
+        m_dataWritten = 0;
+        m_amplitude = -160.0;
+        m_maxAmplitude = -160.0;
+    }
 
     if (m_pConfig && m_pConfig->encoderName == AudioEncoder().aacLc) {
         if (m_pConfig->sampleRate != 44100 && m_pConfig->sampleRate != 48000) {
@@ -458,15 +506,8 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
         m_contextInitialized = true;
     }
 
-    // Check if we can reuse the existing initialized device
-    bool reuseDevice = false;
-    if (m_deviceInitialized) {
-        if (m_lastDeviceId == m_pConfig->deviceId &&
-            m_lastNumChannels == m_pConfig->numChannels &&
-            m_lastSampleRate == m_pConfig->sampleRate) {
-            reuseDevice = true;
-        }
-    }
+    // Check if we can reuse the existing initialized device (already checked above, but keep for logic flow)
+    // reuseDevice is already calculated at the start of InitRecording
 
     if (!reuseDevice) {
         UninitDevice();
@@ -843,7 +884,12 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
     const size_t bytesPerFrame = static_cast<size_t>(frameSize) * sizeof(int16_t) * m_targetChannels;
     const size_t targetBufferBytes = static_cast<size_t>(m_targetSampleRate) * sizeof(int16_t) * m_targetChannels * kRingBufferMs / 1000;
     const size_t ringBufferBytes = std::max(bytesPerFrame * 4, targetBufferBytes);
-    m_ringBuffer = std::make_unique<RingBuffer>(ringBufferBytes);
+    
+    // Replace ring buffer under lock to be safe with OnAudioData
+    {
+        AutoLock lockBuffer(m_critsec);
+        m_ringBuffer = std::make_unique<RingBuffer>(ringBufferBytes);
+    }
 
     return S_OK;
 }
@@ -901,7 +947,8 @@ HRESULT Recorder::EndRecording() {
     AutoLock lock(m_critsec);
 
     // Stop miniaudio device (but don't uninit yet, to allow reuse)
-    if (m_deviceInitialized) {
+    // If continuous capture is enabled, keep the device running
+    if (m_deviceInitialized && !m_continuousCaptureEnabled.load()) {
         ma_device_stop(&m_device);
         // ma_device_uninit(&m_device); -> Moved to UninitDevice()
         // m_deviceInitialized = false;
@@ -973,13 +1020,22 @@ HRESULT Recorder::EndRecording() {
     m_maxAmplitude = -160.0;
     m_isPaused = false;
     m_stopRequested = false;
-    m_pConfig.reset();
+    // Only reset pConfig if continuous capture is not enabled
+    if (!m_continuousCaptureEnabled.load()) {
+        m_pConfig.reset();
+    }
     m_recordingPath.clear();
 
     return S_OK;
 }
 
 HRESULT Recorder::Dispose() {
+    // Disable continuous capture first
+    if (m_continuousCaptureEnabled.load()) {
+        m_continuousCaptureEnabled = false;  // Set flag first to prevent deadlock
+        m_continuousCaptureConfig.reset();
+    }
+
     HRESULT hr = EndRecording();
 
     UninitDevice();
@@ -1057,6 +1113,102 @@ void Recorder::UninitDevice() {
         ma_device_uninit(&m_device);
         m_deviceInitialized = false;
     }
+}
+
+// Continuous Capture Methods
+HRESULT Recorder::EnableContinuousCapture(std::unique_ptr<RecordConfig> config) {
+    AutoLock lock(m_critsec);
+
+    // If already capturing with the same config, do nothing
+    if (m_continuousCaptureEnabled.load() && m_continuousCaptureConfig) {
+        if (m_continuousCaptureConfig->deviceId == config->deviceId &&
+            m_continuousCaptureConfig->sampleRate == config->sampleRate &&
+            m_continuousCaptureConfig->numChannels == config->numChannels) {
+            std::cout << "Record: Continuous capture already enabled with same config." << std::endl;
+            return S_OK;
+        }
+        // Different config - disable first
+        std::cout << "Record: Different config requested, disabling current continuous capture." << std::endl;
+        
+        // If we are currently recording, we must stop it cleanly before switching hardware
+        if (m_recordState != RecordState::stop) {
+            std::cout << "Record: Aborting active recording due to device switch." << std::endl;
+            Stop();
+        }
+        
+        DisableContinuousCapture();
+    }
+
+    std::cout << "Record: Enabling continuous capture..." << std::endl;
+
+    // Store the config
+    m_continuousCaptureConfig = std::move(config);
+    m_pConfig = std::make_unique<RecordConfig>(*m_continuousCaptureConfig);
+
+    // Initialize miniaudio context if not already done
+    if (!m_contextInitialized) {
+        ma_context_config contextConfig = ma_context_config_init();
+        if (ma_context_init(NULL, 0, &contextConfig, &m_context) != MA_SUCCESS) {
+            std::cerr << "Record: Failed to initialize miniaudio context for continuous capture." << std::endl;
+            return E_FAIL;
+        }
+        m_contextInitialized = true;
+    }
+
+    // Initialize the device using the same logic as InitRecording but without the encoder setup
+    HRESULT hr = InitRecording(std::make_unique<RecordConfig>(*m_continuousCaptureConfig));
+    if (FAILED(hr)) {
+        std::cerr << "Record: Failed to initialize device for continuous capture." << std::endl;
+        m_continuousCaptureConfig.reset();
+        return hr;
+    }
+
+    // Start the device - audio will be captured but discarded until recording starts
+    if (ma_device_start(&m_device) != MA_SUCCESS) {
+        std::cerr << "Record: Failed to start device for continuous capture." << std::endl;
+        UninitDevice();
+        m_continuousCaptureConfig.reset();
+        return E_FAIL;
+    }
+
+    m_continuousCaptureEnabled = true;
+    std::cout << "Record: Continuous capture enabled successfully." << std::endl;
+    return S_OK;
+}
+
+HRESULT Recorder::DisableContinuousCapture() {
+    AutoLock lock(m_critsec);
+
+    if (!m_continuousCaptureEnabled.load()) {
+        return S_OK;
+    }
+
+    std::cout << "Record: Disabling continuous capture persistence." << std::endl;
+
+    // Turn off persistence flag
+    m_continuousCaptureEnabled = false;
+    m_continuousCaptureConfig.reset();
+
+    // If we are NOT currently recording, we can shut down the device immediately.
+    // If we ARE recording, we let the recording continue. When the user eventually
+    // calls Stop(), EndRecording() will see that m_continuousCaptureEnabled is false
+    // and will shut down the device then.
+    if (m_recordState == RecordState::stop) {
+        std::cout << "Record: Not recording, shutting down device now." << std::endl;
+        if (m_deviceInitialized) {
+            ma_device_stop(&m_device);
+            UninitDevice();
+        }
+        m_pConfig.reset();
+    } else {
+        std::cout << "Record: Recording active, device will be shared until Stop() is called." << std::endl;
+    }
+
+    return S_OK;
+}
+
+bool Recorder::IsContinuousCaptureEnabled() const {
+    return m_continuousCaptureEnabled.load();
 }
 
 } // namespace record_windows

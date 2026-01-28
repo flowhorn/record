@@ -282,6 +282,25 @@ namespace record_windows {
         {
             ListInputDevices(*result);
         }
+        else if (method_call.method_name().compare("enableContinuousCapture") == 0)
+        {
+            auto config = InitRecordConfig(mapArgs);
+            HRESULT hr = recorder->EnableContinuousCapture(std::move(config));
+
+            if (SUCCEEDED(hr)) { result->Success(EncodableValue()); }
+            else { ErrorFromHR(hr, *result); }
+        }
+        else if (method_call.method_name().compare("disableContinuousCapture") == 0)
+        {
+            HRESULT hr = recorder->DisableContinuousCapture();
+
+            if (SUCCEEDED(hr)) { result->Success(EncodableValue()); }
+            else { ErrorFromHR(hr, *result); }
+        }
+        else if (method_call.method_name().compare("isContinuousCaptureEnabled") == 0)
+        {
+            result->Success(EncodableValue(recorder->IsContinuousCaptureEnabled()));
+        }
     }
 
     std::unique_ptr<RecordConfig> RecordWindowsPlugin::InitRecordConfig(const EncodableMap* args)
