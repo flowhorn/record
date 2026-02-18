@@ -48,67 +48,86 @@ void Recorder::WarmUpAsync() {
     std::thread([this]() {
         {
             AutoLock lock(m_critsec);
-
             if (m_warmedUp) {
                 std::cout << "Record: WarmUp already completed, skipping." << std::endl;
                 m_warmingUp = false;
                 return;
             }
+        }
 
-            std::cout << "Record: WarmUp starting..." << std::endl;
+        std::cout << "Record: WarmUp starting..." << std::endl;
 
-            // Initialize context if needed and enumerate devices to warm up WASAPI
-            if (!m_contextInitialized) {
-                std::cout << "Record: Initializing miniaudio context..." << std::endl;
-                ma_context_config contextConfig = ma_context_config_init();
-                if (ma_context_init(NULL, 0, &contextConfig, &m_context) != MA_SUCCESS) {
-                    std::cout << "Record: Failed to initialize miniaudio context." << std::endl;
-                    m_warmingUp = false;
-                    return;
-                }
-                m_contextInitialized = true;
-            }
+        // Use a dedicated temporary context/device to avoid lock contention or
+        // deadlocks with the real recorder lifecycle.
+        ma_context warmContext;
+        ma_context_config contextConfig = ma_context_config_init();
+        ma_result contextResult = ma_context_init(NULL, 0, &contextConfig, &warmContext);
+        if (contextResult != MA_SUCCESS) {
+            std::cout << "Record: Failed to initialize warm-up miniaudio context (non-critical)." << std::endl;
+            AutoLock lock(m_critsec);
+            m_warmedUp = true;
+            m_warmingUp = false;
+            return;
+        }
 
-            ma_device_info* pPlaybackDeviceInfos = nullptr;
-            ma_uint32 playbackDeviceCount = 0;
-            ma_device_info* pCaptureDeviceInfos = nullptr;
-            ma_uint32 captureDeviceCount = 0;
-            ma_context_get_devices(&m_context, &pPlaybackDeviceInfos, &playbackDeviceCount, &pCaptureDeviceInfos, &captureDeviceCount);
+        ma_device_info* pPlaybackDeviceInfos = nullptr;
+        ma_uint32 playbackDeviceCount = 0;
+        ma_device_info* pCaptureDeviceInfos = nullptr;
+        ma_uint32 captureDeviceCount = 0;
+        if (ma_context_get_devices(&warmContext, &pPlaybackDeviceInfos, &playbackDeviceCount, &pCaptureDeviceInfos, &captureDeviceCount) == MA_SUCCESS) {
             std::cout << "Record: Device enumeration complete. Found " << captureDeviceCount << " capture device(s)." << std::endl;
+        } else {
+            std::cout << "Record: Device enumeration failed during warm-up (non-critical)." << std::endl;
+        }
 
-            // Briefly open the default capture device to prime audio stack, then close.
-            std::cout << "Record: Opening temporary capture device to prime audio stack..." << std::endl;
-            ma_device warmDevice;
-            ma_device_config deviceConfig = ma_device_config_init(ma_device_type_capture);
-            deviceConfig.capture.format = ma_format_s16;
-            deviceConfig.capture.channels = 1;
-            deviceConfig.sampleRate = 48000;
-            deviceConfig.dataCallback = AudioDataCallback;
-            deviceConfig.pUserData = this;
-            deviceConfig.performanceProfile = ma_performance_profile_low_latency;
-            deviceConfig.periodSizeInFrames = deviceConfig.sampleRate / (1000 / kNonAacFrameMs);
-            deviceConfig.periods = 2;
-            deviceConfig.wasapi.noHardwareOffloading = MA_TRUE;
-            deviceConfig.wasapi.noAutoConvertSRC = MA_TRUE;
-            deviceConfig.wasapi.noAutoStreamRouting = MA_TRUE;
-            deviceConfig.wasapi.usage = ma_wasapi_usage_pro_audio;  // Request pro audio mode for lowest latency
+        // Briefly open the default capture device to prime audio stack, then close.
+        std::cout << "Record: Opening temporary capture device to prime audio stack..." << std::endl;
+        ma_device warmDevice;
+        ma_device_config deviceConfig = ma_device_config_init(ma_device_type_capture);
+        deviceConfig.capture.format = ma_format_s16;
+        deviceConfig.capture.channels = 1;
+        deviceConfig.sampleRate = 48000;
+        deviceConfig.dataCallback = WarmUpDataCallback;
+        deviceConfig.pUserData = nullptr;
+        deviceConfig.performanceProfile = ma_performance_profile_low_latency;
+        deviceConfig.periodSizeInFrames = deviceConfig.sampleRate / (1000 / kNonAacFrameMs);
+        deviceConfig.periods = 2;
+        deviceConfig.wasapi.noHardwareOffloading = MA_TRUE;
+        deviceConfig.wasapi.noAutoConvertSRC = MA_TRUE;
+        deviceConfig.wasapi.noAutoStreamRouting = MA_TRUE;
+        deviceConfig.wasapi.usage = ma_wasapi_usage_pro_audio;  // Request pro audio mode for lowest latency
 
-            if (ma_device_init(&m_context, &deviceConfig, &warmDevice) == MA_SUCCESS) {
-                ma_device_start(&warmDevice);
-                // Run for 300ms to fully prime Windows audio stack (WASAPI can have significant startup latency)
+        if (ma_device_init(&warmContext, &deviceConfig, &warmDevice) == MA_SUCCESS) {
+            if (ma_device_start(&warmDevice) == MA_SUCCESS) {
+                // Run for 300ms to fully prime Windows audio stack.
                 std::this_thread::sleep_for(std::chrono::milliseconds(300));
                 ma_device_stop(&warmDevice);
-                ma_device_uninit(&warmDevice);
                 std::cout << "Record: Temporary capture device primed successfully (300ms)." << std::endl;
             } else {
-                std::cout << "Record: Failed to initialize temporary capture device (non-critical)." << std::endl;
+                std::cout << "Record: Failed to start temporary capture device during warm-up (non-critical)." << std::endl;
             }
-
-            m_warmedUp = true;
-            std::cout << "Record: WarmUp complete." << std::endl;
+            ma_device_uninit(&warmDevice);
+        } else {
+            std::cout << "Record: Failed to initialize temporary capture device (non-critical)." << std::endl;
         }
+
+        ma_context_uninit(&warmContext);
+
+        {
+            AutoLock lock(m_critsec);
+            m_warmedUp = true;
+        }
+        std::cout << "Record: WarmUp complete." << std::endl;
         m_warmingUp = false;
     }).detach();
+}
+
+// static
+void Recorder::WarmUpDataCallback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
+    (void)pDevice;
+    (void)pOutput;
+    (void)pInput;
+    (void)frameCount;
 }
 
 // static

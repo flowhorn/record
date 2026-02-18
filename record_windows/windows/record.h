@@ -56,6 +56,7 @@ namespace record_windows {
     private:
         // Miniaudio callback - called from audio thread
         static void AudioDataCallback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);
+        static void WarmUpDataCallback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);
         void OnAudioData(const void* pInput, ma_uint32 frameCount);
 
         // Encoder thread function
