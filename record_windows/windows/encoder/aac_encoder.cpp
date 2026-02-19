@@ -1,6 +1,7 @@
 #include "aac_encoder.h"
 #include "aac_container_negotiation.h"
 #include <iostream>
+#include <sstream>
 
 template <class T> void SafeRelease(T **ppT)
 {
@@ -116,6 +117,43 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
     HRESULT lastHr = E_FAIL;
     NegotiatedAacOutputInfo negotiatedOutputInfo;
 
+    auto formatUInt32List = [](const std::vector<UINT32>& values) -> std::string {
+        std::ostringstream oss;
+        for (size_t i = 0; i < values.size(); ++i) {
+            if (i > 0) oss << ", ";
+            oss << values[i];
+        }
+        return oss.str();
+    };
+
+    auto computeAutoBitrateTarget = [](UINT32 sampleRate, UINT32 channels) -> UINT32 {
+        if (channels <= 1) {
+            if (sampleRate <= 12000) return 24000;
+            if (sampleRate <= 16000) return 32000;
+            if (sampleRate <= 24000) return 40000;
+            if (sampleRate <= 32000) return 48000;
+            return 64000;
+        }
+        if (sampleRate <= 16000) return 32000;
+        if (sampleRate <= 24000) return 48000;
+        if (sampleRate <= 32000) return 64000;
+        return 96000;
+    };
+
+    auto computeAutoBitrateFloor = [](UINT32 sampleRate, UINT32 channels) -> UINT32 {
+        if (channels <= 1) {
+            if (sampleRate <= 12000) return 12000;
+            if (sampleRate <= 16000) return 16000;
+            if (sampleRate <= 24000) return 24000;
+            if (sampleRate <= 32000) return 32000;
+            return 48000;
+        }
+        if (sampleRate <= 16000) return 24000;
+        if (sampleRate <= 24000) return 32000;
+        if (sampleRate <= 32000) return 48000;
+        return 64000;
+    };
+
     struct BitrateAttempt {
         bool useDefaultBitrate;
         UINT32 avgBitrate;
@@ -144,22 +182,31 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
         }
     }
 
+    std::cout << "Record: AAC negotiation request " << m_sampleRate << " Hz, "
+              << m_channels << " channel(s), bitrate "
+              << (m_bitrate > 0 ? std::to_string(m_bitrate) : std::string("auto"))
+              << "." << std::endl;
+    std::cout << "Record: AAC output rate candidates: "
+              << formatUInt32List(outputRateCandidates) << std::endl;
+    std::cout << "Record: AAC output channel candidates: "
+              << formatUInt32List(outputChannelCandidates) << std::endl;
+
     auto buildBitrateAttempts = [&](UINT32 outputSampleRate, UINT32 outputChannels) {
         std::vector<BitrateAttempt> attempts;
+        int requestedBitrate = m_bitrate;
+        if (requestedBitrate <= 0) {
+            requestedBitrate = static_cast<int>(
+                computeAutoBitrateTarget(outputSampleRate, outputChannels));
+        }
         const auto bitrateCandidates = BuildAacBitrateCandidates(
-            m_bitrate, (int)outputSampleRate, (int)outputChannels);
-        const bool preferDefaultBitrate = (m_bitrate <= 0) || (outputSampleRate <= 16000);
+            requestedBitrate, (int)outputSampleRate, (int)outputChannels);
 
         attempts.reserve(bitrateCandidates.size() + 1);
-        if (preferDefaultBitrate) {
-            attempts.push_back({true, 0});
-        }
         for (uint32_t bitrate : bitrateCandidates) {
             attempts.push_back({false, static_cast<UINT32>(bitrate)});
         }
-        if (!preferDefaultBitrate) {
-            attempts.push_back({true, 0});
-        }
+        // Always keep encoder default as final escape hatch.
+        attempts.push_back({true, 0});
 
         return attempts;
     };
@@ -171,7 +218,9 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
                             bool useDefaultBitrate,
                             UINT32 avgBitrate,
                             bool disableConverters,
-                            bool requireExactOutput) -> HRESULT {
+                            bool requireExactOutput,
+                            bool requireRequestedChannels,
+                            bool allowVeryLowAutoBitrate) -> HRESULT {
         IMFSinkWriter* pSinkWriter = NULL;
         IMFAttributes* pSinkWriterAttributes = NULL;
         IMFMediaType* pMediaTypeOut = NULL;
@@ -325,6 +374,26 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
                               << m_sampleRate << " Hz, " << m_channels
                               << " channel(s). Retrying exact mode." << std::endl;
                     hr = MF_E_INVALIDMEDIATYPE;
+                } else if (!requireExactOutput &&
+                           requireRequestedChannels &&
+                           info.channels != static_cast<UINT32>(m_channels)) {
+                    std::cerr << "Record: AAC negotiated output channels " << info.channels
+                              << " differs from requested " << m_channels
+                              << " in channel-preserving mode. Retrying." << std::endl;
+                    hr = MF_E_INVALIDMEDIATYPE;
+                } else if (m_bitrate <= 0 &&
+                           info.hasAvgBitrate &&
+                           !allowVeryLowAutoBitrate) {
+                    const UINT32 minAutoBitrate = computeAutoBitrateFloor(
+                        info.sampleRate, info.channels);
+                    if (info.avgBitrate < minAutoBitrate) {
+                        std::cerr << "Record: AAC negotiated auto bitrate " << info.avgBitrate
+                                  << " bps is below preferred minimum " << minAutoBitrate
+                                  << " bps for " << info.sampleRate << " Hz/"
+                                  << info.channels << "ch. Retrying higher-quality options."
+                                  << std::endl;
+                        hr = MF_E_INVALIDMEDIATYPE;
+                    }
                 }
             } else {
                 std::cerr << "Record: Failed to query negotiated AAC output type: "
@@ -344,7 +413,12 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
         return hr;
     };
 
-    auto runAttempts = [&](bool disableConverters, bool requireExactOutput) -> HRESULT {
+    auto runAttempts = [&](const char* passName,
+                           bool disableConverters,
+                           bool requireExactOutput,
+                           bool requireRequestedChannels,
+                           bool allowVeryLowAutoBitrate) -> HRESULT {
+        std::cout << "Record: AAC negotiation pass '" << passName << "' started." << std::endl;
         for (const auto& formatAttempt : outputFormatAttempts) {
             if (requireExactOutput && !formatAttempt.exactRequested) {
                 continue;
@@ -352,6 +426,27 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
 
             const auto bitrateAttempts = buildBitrateAttempts(
                 formatAttempt.sampleRate, formatAttempt.channels);
+            if (m_bitrate <= 0) {
+                const UINT32 autoTarget = computeAutoBitrateTarget(
+                    formatAttempt.sampleRate, formatAttempt.channels);
+                const UINT32 autoFloor = computeAutoBitrateFloor(
+                    formatAttempt.sampleRate, formatAttempt.channels);
+                std::ostringstream bitrateOss;
+                for (size_t i = 0; i < bitrateAttempts.size(); ++i) {
+                    if (i > 0) bitrateOss << ", ";
+                    if (bitrateAttempts[i].useDefaultBitrate) {
+                        bitrateOss << "default";
+                    } else {
+                        bitrateOss << bitrateAttempts[i].avgBitrate;
+                    }
+                }
+                std::cout << "Record: AAC auto bitrate for output "
+                          << formatAttempt.sampleRate << " Hz/" << formatAttempt.channels
+                          << "ch -> target " << autoTarget
+                          << " bps, floor " << autoFloor
+                          << " bps, candidates [" << bitrateOss.str() << "]."
+                          << std::endl;
+            }
 
             for (UINT32 profileLevel : profileLevelCandidates) {
                 const bool useDefaultProfile = (profileLevel == 0);
@@ -364,7 +459,9 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
                         bitrateAttempt.useDefaultBitrate,
                         bitrateAttempt.avgBitrate,
                         disableConverters,
-                        requireExactOutput);
+                        requireExactOutput,
+                        requireRequestedChannels,
+                        allowVeryLowAutoBitrate);
 
                     if (SUCCEEDED(hr)) {
                         if (useDefaultProfile) {
@@ -411,16 +508,32 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
         return lastHr;
     };
 
-    HRESULT hr = runAttempts(true, true);
+    HRESULT hr = runAttempts("exact", true, true, true, false);
     if (SUCCEEDED(hr)) {
         return hr;
     }
 
     std::cerr << "Record: Exact AAC output not supported by this encoder/device combo. "
-              << "Falling back to compatible AAC negotiation." << std::endl;
-    hr = runAttempts(false, false);
+              << "Falling back to channel-preserving AAC negotiation." << std::endl;
+    hr = runAttempts("channel-preserving", false, false, true, false);
     if (SUCCEEDED(hr)) {
         return hr;
+    }
+
+    std::cerr << "Record: Channel-preserving AAC negotiation not supported. "
+              << "Falling back to fully compatible AAC negotiation." << std::endl;
+    hr = runAttempts("compatible", false, false, false, false);
+    if (SUCCEEDED(hr)) {
+        return hr;
+    }
+
+    if (m_bitrate <= 0) {
+        std::cerr << "Record: Preferred auto-bitrate floor could not be met. "
+                  << "Allowing very low auto bitrate as last resort." << std::endl;
+        hr = runAttempts("compatible-low-bitrate", false, false, false, true);
+        if (SUCCEEDED(hr)) {
+            return hr;
+        }
     }
 
     std::cerr << "ConfigSinkWriter failed at step Setup: " << hr << std::endl;

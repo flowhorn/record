@@ -102,11 +102,24 @@ std::vector<uint32_t> BuildAacSampleRateCandidates(int requestedSampleRate) {
         }
     }
 
-    // Nearest rate first. For ties, prefer lower rate to limit bandwidth.
+    // Prefer keeping or increasing requested quality first (>= requested),
+    // then try lower rates only as fallback.
     std::stable_sort(uniqueCandidates.begin(), uniqueCandidates.end(), [requested](uint32_t a, uint32_t b) {
+        const bool aBelow = a < requested;
+        const bool bBelow = b < requested;
+        if (aBelow != bBelow) {
+            return !aBelow;
+        }
+
         const int da = std::abs((int)a - (int)requested);
         const int db = std::abs((int)b - (int)requested);
-        if (da == db) return a < b;
+        if (da == db) {
+            if (aBelow && bBelow) {
+                // For lower-than-requested rates, try the closest higher one first.
+                return a > b;
+            }
+            return a < b;
+        }
         return da < db;
     });
 
