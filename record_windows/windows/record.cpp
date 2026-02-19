@@ -14,6 +14,14 @@ namespace record_windows {
 static const int kNonAacFrameMs = 10;      // 10ms frames for non-AAC encoders (lower may cause stability issues)
 static const int kRingBufferMs = 100;      // Ring buffer size - larger to handle encoder startup without loss
 
+// Warm-up only needs to exercise the device path, it should never touch recorder state.
+static void WarmUpDataCallback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
+    (void)pDevice;
+    (void)pOutput;
+    (void)pInput;
+    (void)frameCount;
+}
+
 // static
 HRESULT Recorder::CreateInstance(EventStreamHandler<>* stateEventHandler, 
                                   EventStreamHandler<>* recordEventHandler, 
@@ -44,71 +52,84 @@ void Recorder::WarmUpAsync() {
         return;
     }
 
+    if (m_warmUpThread.joinable()) {
+        m_warmUpThread.join();
+    }
+
     std::cout << "Record: Starting async warm-up..." << std::endl;
-    std::thread([this]() {
+    m_warmUpThread = std::thread([this]() {
         {
             AutoLock lock(m_critsec);
-
             if (m_warmedUp) {
                 std::cout << "Record: WarmUp already completed, skipping." << std::endl;
                 m_warmingUp = false;
                 return;
             }
+        }
 
-            std::cout << "Record: WarmUp starting..." << std::endl;
+        std::cout << "Record: WarmUp starting..." << std::endl;
 
-            // Initialize context if needed and enumerate devices to warm up WASAPI
-            if (!m_contextInitialized) {
-                std::cout << "Record: Initializing miniaudio context..." << std::endl;
-                ma_context_config contextConfig = ma_context_config_init();
-                if (ma_context_init(NULL, 0, &contextConfig, &m_context) != MA_SUCCESS) {
-                    std::cout << "Record: Failed to initialize miniaudio context." << std::endl;
-                    m_warmingUp = false;
-                    return;
-                }
-                m_contextInitialized = true;
-            }
+        // Warm-up should not block recorder locks. Use a temporary context/device.
+        ma_context warmContext;
+        ma_context_config contextConfig = ma_context_config_init();
+        ma_result contextResult = ma_context_init(NULL, 0, &contextConfig, &warmContext);
+        if (contextResult != MA_SUCCESS) {
+            std::cout << "Record: Failed to initialize warm-up miniaudio context (" << contextResult << ")." << std::endl;
+            m_warmingUp = false;
+            return;
+        }
 
-            ma_device_info* pPlaybackDeviceInfos = nullptr;
-            ma_uint32 playbackDeviceCount = 0;
-            ma_device_info* pCaptureDeviceInfos = nullptr;
-            ma_uint32 captureDeviceCount = 0;
-            ma_context_get_devices(&m_context, &pPlaybackDeviceInfos, &playbackDeviceCount, &pCaptureDeviceInfos, &captureDeviceCount);
-            std::cout << "Record: Device enumeration complete. Found " << captureDeviceCount << " capture device(s)." << std::endl;
+        ma_device_info* pPlaybackDeviceInfos = nullptr;
+        ma_uint32 playbackDeviceCount = 0;
+        ma_device_info* pCaptureDeviceInfos = nullptr;
+        ma_uint32 captureDeviceCount = 0;
+        ma_context_get_devices(&warmContext, &pPlaybackDeviceInfos, &playbackDeviceCount, &pCaptureDeviceInfos, &captureDeviceCount);
+        std::cout << "Record: Device enumeration complete. Found " << captureDeviceCount << " capture device(s)." << std::endl;
 
-            // Briefly open the default capture device to prime audio stack, then close.
-            std::cout << "Record: Opening temporary capture device to prime audio stack..." << std::endl;
-            ma_device warmDevice;
-            ma_device_config deviceConfig = ma_device_config_init(ma_device_type_capture);
-            deviceConfig.capture.format = ma_format_s16;
-            deviceConfig.capture.channels = 1;
-            deviceConfig.sampleRate = 48000;
-            deviceConfig.dataCallback = AudioDataCallback;
-            deviceConfig.pUserData = this;
-            deviceConfig.performanceProfile = ma_performance_profile_low_latency;
-            deviceConfig.periodSizeInFrames = deviceConfig.sampleRate / (1000 / kNonAacFrameMs);
-            deviceConfig.periods = 2;
-            deviceConfig.wasapi.noHardwareOffloading = MA_TRUE;
-            deviceConfig.wasapi.noAutoConvertSRC = MA_TRUE;
-            deviceConfig.wasapi.noAutoStreamRouting = MA_TRUE;
-            deviceConfig.wasapi.usage = ma_wasapi_usage_pro_audio;  // Request pro audio mode for lowest latency
+        // Briefly open the default capture device to prime audio stack, then close.
+        std::cout << "Record: Opening temporary capture device to prime audio stack..." << std::endl;
+        ma_device warmDevice;
+        ma_device_config deviceConfig = ma_device_config_init(ma_device_type_capture);
+        deviceConfig.capture.format = ma_format_s16;
+        deviceConfig.capture.channels = 1;
+        deviceConfig.sampleRate = 48000;
+        deviceConfig.dataCallback = WarmUpDataCallback;
+        deviceConfig.pUserData = NULL;
+        deviceConfig.performanceProfile = ma_performance_profile_low_latency;
+        deviceConfig.periodSizeInFrames = deviceConfig.sampleRate / (1000 / kNonAacFrameMs);
+        deviceConfig.periods = 2;
+        deviceConfig.wasapi.noHardwareOffloading = MA_TRUE;
+        deviceConfig.wasapi.noAutoConvertSRC = MA_TRUE;
+        deviceConfig.wasapi.noAutoStreamRouting = MA_TRUE;
+        deviceConfig.wasapi.usage = ma_wasapi_usage_pro_audio;  // Request pro audio mode for lowest latency
 
-            if (ma_device_init(&m_context, &deviceConfig, &warmDevice) == MA_SUCCESS) {
-                ma_device_start(&warmDevice);
+        if (ma_device_init(&warmContext, &deviceConfig, &warmDevice) == MA_SUCCESS) {
+            auto startResult = ma_device_start(&warmDevice);
+            if (startResult == MA_SUCCESS) {
                 // Run for 300ms to fully prime Windows audio stack (WASAPI can have significant startup latency)
                 std::this_thread::sleep_for(std::chrono::milliseconds(300));
-                ma_device_stop(&warmDevice);
-                ma_device_uninit(&warmDevice);
+                auto stopResult = ma_device_stop(&warmDevice);
+                if (stopResult != MA_SUCCESS) {
+                    std::cout << "Record: Temporary capture device stop failed (" << stopResult << ")." << std::endl;
+                }
                 std::cout << "Record: Temporary capture device primed successfully (300ms)." << std::endl;
             } else {
-                std::cout << "Record: Failed to initialize temporary capture device (non-critical)." << std::endl;
+                std::cout << "Record: Temporary capture device start failed (" << startResult << ")." << std::endl;
             }
-
-            m_warmedUp = true;
-            std::cout << "Record: WarmUp complete." << std::endl;
+            ma_device_uninit(&warmDevice);
+        } else {
+            std::cout << "Record: Failed to initialize temporary capture device (non-critical)." << std::endl;
         }
+
+        ma_context_uninit(&warmContext);
+
+        {
+            AutoLock lock(m_critsec);
+            m_warmedUp = true;
+        }
+        std::cout << "Record: WarmUp complete." << std::endl;
         m_warmingUp = false;
-    }).detach();
+    });
 }
 
 // static
@@ -485,9 +506,9 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
     }
 
     if (m_pConfig && m_pConfig->encoderName == AudioEncoder().aacLc) {
-        if (m_pConfig->sampleRate != 44100 && m_pConfig->sampleRate != 48000) {
-            std::cout << "Record: AAC requires 44.1k or 48k. Overriding sample rate to 48000." << std::endl;
-            m_pConfig->sampleRate = 48000;
+        if (m_pConfig->sampleRate <= 0) {
+            std::cout << "Record: AAC requires a positive sample rate. Overriding sample rate to 44100." << std::endl;
+            m_pConfig->sampleRate = 44100;
         }
         if (m_pConfig->numChannels < 1) {
             m_pConfig->numChannels = 1;
@@ -586,15 +607,9 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
 
                 targetRateSupported = supportsRate(static_cast<ma_uint32>(m_pConfig->sampleRate));
 
-                if (!supportsRate(48000) && supportsRate(44100)) {
-                    std::cout << "Record: Selected device does not advertise 48k. Falling back to 44.1k for AAC." << std::endl;
-                    m_pConfig->sampleRate = 44100;
-                    targetRateSupported = true;
-                } else if (supportsRate(48000)) {
-                    m_pConfig->sampleRate = 48000;
-                    targetRateSupported = true;
-                } else if (!supportsRate(static_cast<ma_uint32>(m_pConfig->sampleRate))) {
-                    targetRateSupported = false;
+                if (!targetRateSupported) {
+                    std::cout << "Record: Selected device does not advertise " << m_pConfig->sampleRate
+                              << "Hz for AAC. Will capture at native rate and resample to requested rate." << std::endl;
                 }
 
                 auto supportsChannels = [&](ma_uint32 channels) -> bool {
@@ -686,7 +701,7 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
             deviceConfig.capture.channels = 0; // Allow native channels (will update config later)
             if (!hasSelectedDevice) {
                 deviceConfig.sampleRate = 0;   // Allow native rate for default device
-            } else if (m_pConfig && m_pConfig->encoderName == AudioEncoder().aacLc) {
+            } else if (m_pConfig && m_pConfig->encoderName == AudioEncoder().aacLc && targetRateSupported) {
                 deviceConfig.sampleRate = m_pConfig->sampleRate;
             } else {
                 deviceConfig.sampleRate = 0;   // Allow native rate (will update config later)
@@ -944,25 +959,39 @@ bool Recorder::IsRecording() {
 }
 
 HRESULT Recorder::EndRecording() {
-    AutoLock lock(m_critsec);
+    bool shouldStopDevice = false;
+    bool shouldJoinEncoderThread = false;
 
-    // Stop miniaudio device (but don't uninit yet, to allow reuse)
-    // If continuous capture is enabled, keep the device running
-    if (m_deviceInitialized && !m_continuousCaptureEnabled.load()) {
-        ma_device_stop(&m_device);
-        // ma_device_uninit(&m_device); -> Moved to UninitDevice()
-        // m_deviceInitialized = false;
-    }
+    {
+        AutoLock lock(m_critsec);
 
-    // Drain and stop encoder thread
-    if (m_encoderRunning) {
-        m_stopRequested = true;
-        m_encoderRunning = false;
-        m_dataCondition.notify_all();
-        if (m_encoderThread.joinable()) {
-            m_encoderThread.join();
+        // Stop miniaudio device (but don't uninit yet, to allow reuse).
+        // If continuous capture is enabled, keep the device running.
+        shouldStopDevice = m_deviceInitialized && !m_continuousCaptureEnabled.load();
+
+        // Drain and stop encoder thread.
+        if (m_encoderRunning) {
+            m_stopRequested = true;
+            m_encoderRunning = false;
+            shouldJoinEncoderThread = m_encoderThread.joinable();
         }
     }
+
+    m_dataCondition.notify_all();
+
+    // Avoid lock inversion: callback may need m_critsec while stop waits.
+    if (shouldStopDevice) {
+        ma_result stopResult = ma_device_stop(&m_device);
+        if (stopResult != MA_SUCCESS) {
+            std::cerr << "Record: ma_device_stop failed during EndRecording (" << stopResult << ")." << std::endl;
+        }
+    }
+
+    if (shouldJoinEncoderThread && m_encoderThread.joinable()) {
+        m_encoderThread.join();
+    }
+
+    AutoLock lock(m_critsec);
 
     // Finalize AAC encoder
     if (m_aacEncoder) {
@@ -1030,6 +1059,10 @@ HRESULT Recorder::EndRecording() {
 }
 
 HRESULT Recorder::Dispose() {
+    if (m_warmUpThread.joinable()) {
+        m_warmUpThread.join();
+    }
+
     // Disable continuous capture first
     if (m_continuousCaptureEnabled.load()) {
         m_continuousCaptureEnabled = false;  // Set flag first to prevent deadlock
@@ -1117,91 +1150,132 @@ void Recorder::UninitDevice() {
 
 // Continuous Capture Methods
 HRESULT Recorder::EnableContinuousCapture(std::unique_ptr<RecordConfig> config) {
-    AutoLock lock(m_critsec);
+    if (!config) {
+        return E_INVALIDARG;
+    }
 
-    // If already capturing with the same config, do nothing
-    if (m_continuousCaptureEnabled.load() && m_continuousCaptureConfig) {
-        if (m_continuousCaptureConfig->deviceId == config->deviceId &&
-            m_continuousCaptureConfig->sampleRate == config->sampleRate &&
-            m_continuousCaptureConfig->numChannels == config->numChannels) {
-            std::cout << "Record: Continuous capture already enabled with same config." << std::endl;
-            return S_OK;
+    bool hasExistingCapture = false;
+    bool sameConfig = false;
+    bool shouldStopRecording = false;
+
+    {
+        AutoLock lock(m_critsec);
+        hasExistingCapture = m_continuousCaptureEnabled.load() && m_continuousCaptureConfig;
+        if (hasExistingCapture) {
+            sameConfig = m_continuousCaptureConfig->deviceId == config->deviceId &&
+                         m_continuousCaptureConfig->sampleRate == config->sampleRate &&
+                         m_continuousCaptureConfig->numChannels == config->numChannels;
+            shouldStopRecording = m_recordState != RecordState::stop;
         }
-        // Different config - disable first
+    }
+
+    // If already capturing with the same config, do nothing.
+    if (hasExistingCapture && sameConfig) {
+        std::cout << "Record: Continuous capture already enabled with same config." << std::endl;
+        return S_OK;
+    }
+
+    if (hasExistingCapture) {
         std::cout << "Record: Different config requested, disabling current continuous capture." << std::endl;
-        
-        // If we are currently recording, we must stop it cleanly before switching hardware
-        if (m_recordState != RecordState::stop) {
+        if (shouldStopRecording) {
             std::cout << "Record: Aborting active recording due to device switch." << std::endl;
             Stop();
         }
-        
         DisableContinuousCapture();
     }
 
     std::cout << "Record: Enabling continuous capture..." << std::endl;
 
-    // Store the config
-    m_continuousCaptureConfig = std::move(config);
-    m_pConfig = std::make_unique<RecordConfig>(*m_continuousCaptureConfig);
+    RecordConfig desiredConfig = *config;
 
-    // Initialize miniaudio context if not already done
-    if (!m_contextInitialized) {
-        ma_context_config contextConfig = ma_context_config_init();
-        if (ma_context_init(NULL, 0, &contextConfig, &m_context) != MA_SUCCESS) {
-            std::cerr << "Record: Failed to initialize miniaudio context for continuous capture." << std::endl;
-            return E_FAIL;
+    {
+        AutoLock lock(m_critsec);
+        m_continuousCaptureConfig = std::make_unique<RecordConfig>(desiredConfig);
+        m_pConfig = std::make_unique<RecordConfig>(desiredConfig);
+
+        // Initialize miniaudio context if not already done.
+        if (!m_contextInitialized) {
+            ma_context_config contextConfig = ma_context_config_init();
+            if (ma_context_init(NULL, 0, &contextConfig, &m_context) != MA_SUCCESS) {
+                std::cerr << "Record: Failed to initialize miniaudio context for continuous capture." << std::endl;
+                m_continuousCaptureConfig.reset();
+                m_pConfig.reset();
+                return E_FAIL;
+            }
+            m_contextInitialized = true;
         }
-        m_contextInitialized = true;
     }
 
-    // Initialize the device using the same logic as InitRecording but without the encoder setup
-    HRESULT hr = InitRecording(std::make_unique<RecordConfig>(*m_continuousCaptureConfig));
+    // Initialize the device using the same logic as InitRecording but without the encoder setup.
+    HRESULT hr = InitRecording(std::make_unique<RecordConfig>(desiredConfig));
     if (FAILED(hr)) {
         std::cerr << "Record: Failed to initialize device for continuous capture." << std::endl;
+        AutoLock lock(m_critsec);
         m_continuousCaptureConfig.reset();
+        m_pConfig.reset();
         return hr;
     }
 
-    // Start the device - audio will be captured but discarded until recording starts
-    if (ma_device_start(&m_device) != MA_SUCCESS) {
-        std::cerr << "Record: Failed to start device for continuous capture." << std::endl;
+    // Start the device - audio will be captured but discarded until recording starts.
+    ma_result startResult = ma_device_start(&m_device);
+    if (startResult != MA_SUCCESS) {
+        std::cerr << "Record: Failed to start device for continuous capture (" << startResult << ")." << std::endl;
         UninitDevice();
+        AutoLock lock(m_critsec);
         m_continuousCaptureConfig.reset();
+        m_pConfig.reset();
         return E_FAIL;
     }
 
-    m_continuousCaptureEnabled = true;
+    {
+        AutoLock lock(m_critsec);
+        m_continuousCaptureEnabled = true;
+    }
+
     std::cout << "Record: Continuous capture enabled successfully." << std::endl;
     return S_OK;
 }
 
 HRESULT Recorder::DisableContinuousCapture() {
-    AutoLock lock(m_critsec);
+    bool shouldShutdownDeviceNow = false;
 
-    if (!m_continuousCaptureEnabled.load()) {
-        return S_OK;
+    {
+        AutoLock lock(m_critsec);
+
+        if (!m_continuousCaptureEnabled.load()) {
+            return S_OK;
+        }
+
+        std::cout << "Record: Disabling continuous capture persistence." << std::endl;
+
+        // Turn off persistence flag.
+        m_continuousCaptureEnabled = false;
+        m_continuousCaptureConfig.reset();
+
+        // If we are NOT currently recording, we can shut down the device immediately.
+        // If we ARE recording, we let the recording continue. When the user eventually
+        // calls Stop(), EndRecording() will see that m_continuousCaptureEnabled is false
+        // and will shut down the device then.
+        if (m_recordState == RecordState::stop) {
+            std::cout << "Record: Not recording, shutting down device now." << std::endl;
+            shouldShutdownDeviceNow = m_deviceInitialized;
+        } else {
+            std::cout << "Record: Recording active, device will be shared until Stop() is called." << std::endl;
+            return S_OK;
+        }
     }
 
-    std::cout << "Record: Disabling continuous capture persistence." << std::endl;
-
-    // Turn off persistence flag
-    m_continuousCaptureEnabled = false;
-    m_continuousCaptureConfig.reset();
-
-    // If we are NOT currently recording, we can shut down the device immediately.
-    // If we ARE recording, we let the recording continue. When the user eventually
-    // calls Stop(), EndRecording() will see that m_continuousCaptureEnabled is false
-    // and will shut down the device then.
-    if (m_recordState == RecordState::stop) {
-        std::cout << "Record: Not recording, shutting down device now." << std::endl;
-        if (m_deviceInitialized) {
-            ma_device_stop(&m_device);
-            UninitDevice();
+    if (shouldShutdownDeviceNow) {
+        ma_result stopResult = ma_device_stop(&m_device);
+        if (stopResult != MA_SUCCESS) {
+            std::cerr << "Record: Failed to stop device while disabling continuous capture (" << stopResult << ")." << std::endl;
         }
+        UninitDevice();
+    }
+
+    {
+        AutoLock lock(m_critsec);
         m_pConfig.reset();
-    } else {
-        std::cout << "Record: Recording active, device will be shared until Stop() is called." << std::endl;
     }
 
     return S_OK;

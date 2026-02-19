@@ -79,6 +79,7 @@ namespace record_windows {
         bool m_deviceInitialized = false;
         bool m_warmedUp = false;
         std::atomic<bool> m_warmingUp{false};
+        std::thread m_warmUpThread;
 
         // Cached device config for reuse
         std::string m_lastDeviceId;
