@@ -45,205 +45,192 @@ bool AacEncoder::Initialize(const std::wstring& path, int sampleRate, int channe
 }
 
 HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
-    IMFSinkWriter* pSinkWriter = NULL;
-    IMFMediaType* pMediaTypeOut = NULL;
-    IMFMediaType* pMediaTypeIn = NULL;
-
     const auto bitrateCandidates = BuildAacBitrateCandidates(m_bitrate, m_sampleRate, m_channels);
-    
-    // Create the sink writer
-    // Note: This relies on the file extension to select the container (e.g. .m4a)
-    HRESULT hr = MFCreateSinkWriterFromURL(path.c_str(), NULL, NULL, &pSinkWriter);
-    
-    // Configure output media type (AAC)
-    if (SUCCEEDED(hr)) {
-        hr = MFCreateMediaType(&pMediaTypeOut);
-        if (FAILED(hr)) std::cerr << "MFCreateMediaType Out failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeOut->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-        if (FAILED(hr)) std::cerr << "SetGUID MF_MT_MAJOR_TYPE Out failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeOut->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
-        if (FAILED(hr)) std::cerr << "SetGUID MFAudioFormat_AAC failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeOut->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, m_channels);
-        if (FAILED(hr)) std::cerr << "SetUINT32 Channels Out failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeOut->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, m_sampleRate);
-        if (FAILED(hr)) std::cerr << "SetUINT32 SampleRate Out failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeOut->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE, 0);
-        if (FAILED(hr)) std::cerr << "SetUINT32 PayloadType Out failed: " << hr << std::endl;
-    }
+    const std::vector<UINT32> profileLevelCandidates = {0x29, 0};
+    HRESULT lastHr = E_FAIL;
 
-    // Prefer explicit AAC-LC profile-level signaling and fall back to
-    // unspecified profile-level only if stream creation fails.
-    
-    if (SUCCEEDED(hr)) {
-        HRESULT addStreamHr = E_FAIL;
-        const std::vector<UINT32> profileLevelCandidates = {0x29, 0};
+    auto tryConfigure = [&](bool useDefaultProfile, UINT32 profileLevel, bool useDefaultBitrate, UINT32 avgBitrate) -> HRESULT {
+        IMFSinkWriter* pSinkWriter = NULL;
+        IMFMediaType* pMediaTypeOut = NULL;
+        IMFMediaType* pMediaTypeIn = NULL;
+        DWORD streamIndex = 0;
 
-        for (UINT32 profileLevel : profileLevelCandidates) {
-            if (profileLevel == 0) {
+        HRESULT hr = MFCreateSinkWriterFromURL(path.c_str(), NULL, NULL, &pSinkWriter);
+
+        if (SUCCEEDED(hr)) {
+            hr = MFCreateMediaType(&pMediaTypeOut);
+            if (FAILED(hr)) std::cerr << "MFCreateMediaType Out failed: " << hr << std::endl;
+        }
+
+        if (SUCCEEDED(hr)) {
+            hr = pMediaTypeOut->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+            if (FAILED(hr)) std::cerr << "SetGUID MF_MT_MAJOR_TYPE Out failed: " << hr << std::endl;
+        }
+
+        if (SUCCEEDED(hr)) {
+            hr = pMediaTypeOut->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
+            if (FAILED(hr)) std::cerr << "SetGUID MFAudioFormat_AAC failed: " << hr << std::endl;
+        }
+
+        if (SUCCEEDED(hr)) {
+            hr = pMediaTypeOut->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, m_channels);
+            if (FAILED(hr)) std::cerr << "SetUINT32 Channels Out failed: " << hr << std::endl;
+        }
+
+        if (SUCCEEDED(hr)) {
+            hr = pMediaTypeOut->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, m_sampleRate);
+            if (FAILED(hr)) std::cerr << "SetUINT32 SampleRate Out failed: " << hr << std::endl;
+        }
+
+        if (SUCCEEDED(hr)) {
+            hr = pMediaTypeOut->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+            if (FAILED(hr)) std::cerr << "SetUINT32 BitsPerSample Out failed: " << hr << std::endl;
+        }
+
+        if (SUCCEEDED(hr)) {
+            hr = pMediaTypeOut->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE, 0);
+            if (FAILED(hr)) std::cerr << "SetUINT32 PayloadType Out failed: " << hr << std::endl;
+        }
+
+        if (SUCCEEDED(hr)) {
+            if (useDefaultProfile) {
                 pMediaTypeOut->DeleteItem(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION);
             } else {
-                HRESULT profileHr = pMediaTypeOut->SetUINT32(
-                    MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, profileLevel);
-                if (FAILED(profileHr)) {
-                    continue;
-                }
-            }
-
-            for (uint32_t candidateBitrate : bitrateCandidates) {
-                const UINT32 avgBitrate = static_cast<UINT32>(candidateBitrate);
-                const UINT32 bytesPerSecond = avgBitrate / 8;
-
-                HRESULT setHr = pMediaTypeOut->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bytesPerSecond);
-                if (FAILED(setHr)) {
-                    continue;
-                }
-
-                setHr = pMediaTypeOut->SetUINT32(MF_MT_AVG_BITRATE, avgBitrate);
-                if (FAILED(setHr)) {
-                    continue;
-                }
-
-                addStreamHr = pSinkWriter->AddStream(pMediaTypeOut, &m_streamIndex);
-                if (SUCCEEDED(addStreamHr)) {
-                    if (profileLevel == 0) {
-                        std::cout << "Record: AAC profile-level selected by Media Foundation defaults." << std::endl;
-                    } else {
-                        std::cout << "Record: AAC profile-level set to 0x" << std::hex
-                                  << profileLevel << std::dec << "." << std::endl;
-                    }
-                    std::cout << "Record: AAC bitrate selected " << avgBitrate << " bps." << std::endl;
-                    break;
-                }
-            }
-
-            if (SUCCEEDED(addStreamHr)) {
-                break;
+                hr = pMediaTypeOut->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, profileLevel);
+                if (FAILED(hr)) std::cerr << "SetUINT32 AACProfile Out failed: " << hr << std::endl;
             }
         }
 
-        if (FAILED(addStreamHr)) {
-            // Last fallback: let MF choose profile-level and bitrate.
-            pMediaTypeOut->DeleteItem(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION);
-            pMediaTypeOut->DeleteItem(MF_MT_AUDIO_AVG_BYTES_PER_SECOND);
-            pMediaTypeOut->DeleteItem(MF_MT_AVG_BITRATE);
-            addStreamHr = pSinkWriter->AddStream(pMediaTypeOut, &m_streamIndex);
-            if (SUCCEEDED(addStreamHr)) {
-                std::cout << "Record: AAC profile-level and bitrate selected by Media Foundation defaults." << std::endl;
-            }
-        }
-
-        hr = addStreamHr;
-        if (FAILED(hr)) std::cerr << "AddStream failed: " << hr << std::endl;
-    }
-    
-    // Configure input media type (PCM)
-    if (SUCCEEDED(hr)) {
-        hr = MFCreateMediaType(&pMediaTypeIn);
-        if (FAILED(hr)) std::cerr << "MFCreateMediaType In failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeIn->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-        if (FAILED(hr)) std::cerr << "SetGUID MF_MT_MAJOR_TYPE In failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeIn->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-        if (FAILED(hr)) std::cerr << "SetGUID MFAudioFormat_PCM failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-        if (FAILED(hr)) std::cerr << "SetUINT32 BitsPerSample In failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, m_sampleRate);
-        if (FAILED(hr)) std::cerr << "SetUINT32 SampleRate In failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, m_channels);
-        if (FAILED(hr)) std::cerr << "SetUINT32 Channels In failed: " << hr << std::endl;
-    }
-
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeIn->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
-        if (FAILED(hr)) std::cerr << "SetUINT32 AllSamplesIndependent In failed: " << hr << std::endl;
-    }
-
-    // PCM requires Block Alignment and Avg Bytes/Sec for strict definition
-    if (SUCCEEDED(hr)) {
-        UINT32 blockAlign = m_channels * 2; // 16 bits = 2 bytes
-        hr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, blockAlign);
-        if (FAILED(hr)) std::cerr << "SetUINT32 BlockAlignment In failed: " << hr << std::endl;
-        
         if (SUCCEEDED(hr)) {
-            hr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, m_sampleRate * blockAlign);
-            if (FAILED(hr)) std::cerr << "SetUINT32 AvgBytesPerSecond In failed: " << hr << std::endl;
+            if (useDefaultBitrate) {
+                pMediaTypeOut->DeleteItem(MF_MT_AUDIO_AVG_BYTES_PER_SECOND);
+                pMediaTypeOut->DeleteItem(MF_MT_AVG_BITRATE);
+            } else {
+                const UINT32 bytesPerSecond = avgBitrate / 8;
+                hr = pMediaTypeOut->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bytesPerSecond);
+                if (FAILED(hr)) std::cerr << "SetUINT32 Bitrate Out failed: " << hr << std::endl;
+                if (SUCCEEDED(hr)) {
+                    hr = pMediaTypeOut->SetUINT32(MF_MT_AVG_BITRATE, avgBitrate);
+                    if (FAILED(hr)) std::cerr << "SetUINT32 AvgBitrate Out failed: " << hr << std::endl;
+                }
+            }
+        }
+
+        if (SUCCEEDED(hr)) {
+            hr = pSinkWriter->AddStream(pMediaTypeOut, &streamIndex);
+            if (FAILED(hr)) std::cerr << "AddStream failed: " << hr << std::endl;
+        }
+
+        if (SUCCEEDED(hr)) {
+            hr = MFCreateMediaType(&pMediaTypeIn);
+            if (FAILED(hr)) std::cerr << "MFCreateMediaType In failed: " << hr << std::endl;
+        }
+
+        if (SUCCEEDED(hr)) {
+            hr = pMediaTypeIn->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+            if (FAILED(hr)) std::cerr << "SetGUID MF_MT_MAJOR_TYPE In failed: " << hr << std::endl;
+        }
+
+        if (SUCCEEDED(hr)) {
+            hr = pMediaTypeIn->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
+            if (FAILED(hr)) std::cerr << "SetGUID MFAudioFormat_PCM failed: " << hr << std::endl;
+        }
+
+        if (SUCCEEDED(hr)) {
+            hr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+            if (FAILED(hr)) std::cerr << "SetUINT32 BitsPerSample In failed: " << hr << std::endl;
+        }
+
+        if (SUCCEEDED(hr)) {
+            hr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, m_sampleRate);
+            if (FAILED(hr)) std::cerr << "SetUINT32 SampleRate In failed: " << hr << std::endl;
+        }
+
+        if (SUCCEEDED(hr)) {
+            hr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, m_channels);
+            if (FAILED(hr)) std::cerr << "SetUINT32 Channels In failed: " << hr << std::endl;
+        }
+
+        if (SUCCEEDED(hr)) {
+            hr = pMediaTypeIn->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
+            if (FAILED(hr)) std::cerr << "SetUINT32 AllSamplesIndependent In failed: " << hr << std::endl;
+        }
+
+        if (SUCCEEDED(hr)) {
+            UINT32 blockAlign = m_channels * 2;
+            hr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, blockAlign);
+            if (FAILED(hr)) std::cerr << "SetUINT32 BlockAlignment In failed: " << hr << std::endl;
+
+            if (SUCCEEDED(hr)) {
+                hr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, m_sampleRate * blockAlign);
+                if (FAILED(hr)) std::cerr << "SetUINT32 AvgBytesPerSecond In failed: " << hr << std::endl;
+            }
+        }
+
+        if (SUCCEEDED(hr) && m_channels > 0 && m_channels <= 2) {
+            DWORD channelMask = (m_channels == 1) ? 0x4 : 0x3;
+            HRESULT channelMaskHr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_CHANNEL_MASK, channelMask);
+            if (FAILED(channelMaskHr)) {
+                std::cerr << "SetUINT32 ChannelMask In failed (ignoring): " << channelMaskHr << std::endl;
+            }
+        }
+
+        if (SUCCEEDED(hr)) {
+            hr = pSinkWriter->SetInputMediaType(streamIndex, pMediaTypeIn, NULL);
+            if (FAILED(hr)) std::cerr << "SetInputMediaType failed (Likely format mismatch): " << hr << std::endl;
+        }
+
+        if (SUCCEEDED(hr)) {
+            hr = pSinkWriter->BeginWriting();
+            if (FAILED(hr)) std::cerr << "BeginWriting failed: " << hr << std::endl;
+        }
+
+        if (SUCCEEDED(hr)) {
+            m_streamIndex = streamIndex;
+            m_pSinkWriter = pSinkWriter;
+            m_pSinkWriter->AddRef();
+        }
+
+        SafeRelease(&pSinkWriter);
+        SafeRelease(&pMediaTypeOut);
+        SafeRelease(&pMediaTypeIn);
+
+        return hr;
+    };
+
+    for (UINT32 profileLevel : profileLevelCandidates) {
+        const bool useDefaultProfile = (profileLevel == 0);
+        for (uint32_t candidateBitrate : bitrateCandidates) {
+            const UINT32 avgBitrate = static_cast<UINT32>(candidateBitrate);
+            HRESULT hr = tryConfigure(useDefaultProfile, profileLevel, false, avgBitrate);
+            if (SUCCEEDED(hr)) {
+                if (useDefaultProfile) {
+                    std::cout << "Record: AAC profile-level selected by Media Foundation defaults." << std::endl;
+                } else {
+                    std::cout << "Record: AAC profile-level set to 0x" << std::hex
+                              << profileLevel << std::dec << "." << std::endl;
+                }
+                std::cout << "Record: AAC bitrate selected " << avgBitrate << " bps." << std::endl;
+                return hr;
+            }
+
+            lastHr = hr;
+            std::cerr << "Record: AAC attempt failed for profile "
+                      << (useDefaultProfile ? "default" : "explicit")
+                      << " and bitrate " << avgBitrate
+                      << " bps: " << hr << std::endl;
         }
     }
-    
-    // Often required for strict topology building
-    if (SUCCEEDED(hr) && m_channels > 0 && m_channels <= 2) {
-       DWORD channelMask = (m_channels == 2) ? 3 : 4; // Stereo (FL|FR) or Mono (FC). 3=0x3, 4=0x4 is actually FL. Mono usually 4 (FC) or 3?
-       // WAVE_FORMAT_PCM default mask logic:
-       // 1 channel: SPEAKER_FRONT_CENTER (0x4)
-       // 2 channels: SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT (0x3)
-       if (m_channels == 1) channelMask = 0x4; // FC
-       if (m_channels == 2) channelMask = 0x3; // FL|FR
-       
-       // Note: Some encoders ignore this, others require it
-       // Let's try setting it if it's unset
-       hr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_CHANNEL_MASK, channelMask);
-       if (FAILED(hr)) {
-           std::cerr << "SetUINT32 ChannelMask In failed (ignoring): " << hr << std::endl;
-           hr = S_OK; // Ignore failure here as it might be optional
-       }
-    }
-    
+
+    HRESULT hr = tryConfigure(true, 0, true, 0);
     if (SUCCEEDED(hr)) {
-        hr = pSinkWriter->SetInputMediaType(m_streamIndex, pMediaTypeIn, NULL);
-        if (FAILED(hr)) std::cerr << "SetInputMediaType failed (Likely format mismatch): " << hr << std::endl;
+        std::cout << "Record: AAC profile-level and bitrate selected by Media Foundation defaults." << std::endl;
+        return hr;
     }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pSinkWriter->BeginWriting();
-        if (FAILED(hr)) std::cerr << "BeginWriting failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        m_pSinkWriter = pSinkWriter;
-        m_pSinkWriter->AddRef();
-    } else {
-        std::cerr << "ConfigSinkWriter failed at step " << (pSinkWriter ? "Setup" : "Creation") << ": " << hr << std::endl;
-        
-        // Detailed error check
-        if (!pSinkWriter) std::cerr << "MFCreateSinkWriterFromURL failed" << std::endl;
-        else if (!pMediaTypeOut) std::cerr << "MFCreateMediaType (Out) failed" << std::endl;
-        else if (!pMediaTypeIn) std::cerr << "MFCreateMediaType (In) failed" << std::endl;
-    }
-    
-    SafeRelease(&pSinkWriter);
-    SafeRelease(&pMediaTypeOut);
-    SafeRelease(&pMediaTypeIn);
-    
-    return hr;
+
+    lastHr = hr;
+    std::cerr << "ConfigSinkWriter failed at step Setup: " << lastHr << std::endl;
+    return lastHr;
 }
 
 bool AacEncoder::EncodeFrame(const int16_t* pcm, int frameSize) {
