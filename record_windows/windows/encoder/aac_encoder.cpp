@@ -398,6 +398,12 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
             } else {
                 std::cerr << "Record: Failed to query negotiated AAC output type: "
                           << negotiatedHr << std::endl;
+                if (requireExactOutput || requireRequestedChannels) {
+                    std::cerr << "Record: Rejecting attempt because negotiated output "
+                              << "cannot be verified in strict/channel-preserving mode."
+                              << std::endl;
+                    hr = MF_E_INVALIDMEDIATYPE;
+                }
             }
         }
         if (SUCCEEDED(hr)) {
@@ -515,14 +521,21 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
 
     std::cerr << "Record: Exact AAC output not supported by this encoder/device combo. "
               << "Falling back to channel-preserving AAC negotiation." << std::endl;
-    hr = runAttempts("channel-preserving", false, false, true, false);
+    hr = runAttempts("channel-preserving", true, false, true, false);
     if (SUCCEEDED(hr)) {
         return hr;
     }
 
     std::cerr << "Record: Channel-preserving AAC negotiation not supported. "
               << "Falling back to fully compatible AAC negotiation." << std::endl;
-    hr = runAttempts("compatible", false, false, false, false);
+    hr = runAttempts("compatible", true, false, false, false);
+    if (SUCCEEDED(hr)) {
+        return hr;
+    }
+
+    std::cerr << "Record: Explicit AAC output types unavailable. "
+              << "Trying converter-enabled compatibility fallback." << std::endl;
+    hr = runAttempts("compatible-converters", false, false, false, false);
     if (SUCCEEDED(hr)) {
         return hr;
     }
