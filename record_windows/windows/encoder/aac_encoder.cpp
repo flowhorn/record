@@ -13,6 +13,70 @@ template <class T> void SafeRelease(T **ppT)
 
 namespace record_windows {
 
+struct NegotiatedAacOutputInfo {
+    UINT32 sampleRate = 0;
+    UINT32 channels = 0;
+    bool hasProfileLevel = false;
+    UINT32 profileLevel = 0;
+    bool hasAvgBitrate = false;
+    UINT32 avgBitrate = 0;
+};
+
+static HRESULT GetNegotiatedAacOutputInfo(
+    IMFSinkWriter* pSinkWriter,
+    NegotiatedAacOutputInfo* outputInfo) {
+    if (!pSinkWriter || !outputInfo) {
+        return E_POINTER;
+    }
+
+    IMFMediaSink* pMediaSink = NULL;
+    IMFStreamSink* pStreamSink = NULL;
+    IMFMediaTypeHandler* pTypeHandler = NULL;
+    IMFMediaType* pCurrentType = NULL;
+
+    HRESULT hr = pSinkWriter->GetServiceForStream(
+        MF_SINK_WRITER_MEDIASINK,
+        GUID_NULL,
+        IID_PPV_ARGS(&pMediaSink));
+
+    if (SUCCEEDED(hr)) {
+        hr = pMediaSink->GetStreamSinkByIndex(0, &pStreamSink);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = pStreamSink->GetMediaTypeHandler(&pTypeHandler);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = pTypeHandler->GetCurrentMediaType(&pCurrentType);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = pCurrentType->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &outputInfo->sampleRate);
+    }
+    if (SUCCEEDED(hr)) {
+        hr = pCurrentType->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &outputInfo->channels);
+    }
+    if (SUCCEEDED(hr)) {
+        UINT32 v = 0;
+        if (SUCCEEDED(pCurrentType->GetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, &v))) {
+            outputInfo->hasProfileLevel = true;
+            outputInfo->profileLevel = v;
+        }
+    }
+    if (SUCCEEDED(hr)) {
+        UINT32 v = 0;
+        if (SUCCEEDED(pCurrentType->GetUINT32(MF_MT_AVG_BITRATE, &v))) {
+            outputInfo->hasAvgBitrate = true;
+            outputInfo->avgBitrate = v;
+        }
+    }
+
+    SafeRelease(&pCurrentType);
+    SafeRelease(&pTypeHandler);
+    SafeRelease(&pStreamSink);
+    SafeRelease(&pMediaSink);
+
+    return hr;
+}
+
 AacEncoder::AacEncoder() {
     HRESULT hr = MFStartup(MF_VERSION);
     if (FAILED(hr)) {
@@ -49,14 +113,35 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
     const std::vector<UINT32> profileLevelCandidates = {0x29, 0};
     const bool preferDefaultBitrate = (m_bitrate <= 0) || (m_sampleRate <= 16000);
     HRESULT lastHr = E_FAIL;
+    NegotiatedAacOutputInfo negotiatedOutputInfo;
 
-    auto tryConfigure = [&](bool useDefaultProfile, UINT32 profileLevel, bool useDefaultBitrate, UINT32 avgBitrate) -> HRESULT {
+    auto tryConfigure = [&](bool useDefaultProfile,
+                            UINT32 profileLevel,
+                            bool useDefaultBitrate,
+                            UINT32 avgBitrate,
+                            bool disableConverters,
+                            bool requireExactOutput) -> HRESULT {
         IMFSinkWriter* pSinkWriter = NULL;
+        IMFAttributes* pSinkWriterAttributes = NULL;
         IMFMediaType* pMediaTypeOut = NULL;
         IMFMediaType* pMediaTypeIn = NULL;
         DWORD streamIndex = 0;
 
-        HRESULT hr = MFCreateSinkWriterFromURL(path.c_str(), NULL, NULL, &pSinkWriter);
+        HRESULT hr = S_OK;
+        if (disableConverters) {
+            hr = MFCreateAttributes(&pSinkWriterAttributes, 1);
+            if (SUCCEEDED(hr)) {
+                hr = pSinkWriterAttributes->SetUINT32(MF_READWRITE_DISABLE_CONVERTERS, TRUE);
+                if (FAILED(hr)) {
+                    std::cerr << "SetUINT32 MF_READWRITE_DISABLE_CONVERTERS failed: " << hr << std::endl;
+                }
+            }
+            if (SUCCEEDED(hr)) {
+                hr = MFCreateSinkWriterFromURL(path.c_str(), NULL, pSinkWriterAttributes, &pSinkWriter);
+            }
+        } else {
+            hr = MFCreateSinkWriterFromURL(path.c_str(), NULL, NULL, &pSinkWriter);
+        }
 
         if (SUCCEEDED(hr)) {
             hr = MFCreateMediaType(&pMediaTypeOut);
@@ -187,12 +272,35 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
         }
 
         if (SUCCEEDED(hr)) {
+            NegotiatedAacOutputInfo info;
+            HRESULT negotiatedHr = GetNegotiatedAacOutputInfo(pSinkWriter, &info);
+
+            if (SUCCEEDED(negotiatedHr)) {
+                negotiatedOutputInfo = info;
+                if (requireExactOutput &&
+                    (info.sampleRate != static_cast<UINT32>(m_sampleRate) ||
+                     info.channels != static_cast<UINT32>(m_channels))) {
+                    std::cerr << "Record: AAC negotiated output " << info.sampleRate
+                              << " Hz, " << info.channels
+                              << " channel(s) differs from requested "
+                              << m_sampleRate << " Hz, " << m_channels
+                              << " channel(s). Retrying exact mode." << std::endl;
+                    hr = MF_E_INVALIDMEDIATYPE;
+                }
+            } else {
+                std::cerr << "Record: Failed to query negotiated AAC output type: "
+                          << negotiatedHr << std::endl;
+            }
+        }
+
+        if (SUCCEEDED(hr)) {
             m_streamIndex = streamIndex;
             m_pSinkWriter = pSinkWriter;
             m_pSinkWriter->AddRef();
         }
 
         SafeRelease(&pSinkWriter);
+        SafeRelease(&pSinkWriterAttributes);
         SafeRelease(&pMediaTypeOut);
         SafeRelease(&pMediaTypeIn);
 
@@ -216,50 +324,76 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
         bitrateAttempts.push_back({true, 0});
     }
 
-    for (UINT32 profileLevel : profileLevelCandidates) {
-        const bool useDefaultProfile = (profileLevel == 0);
-        for (const auto& bitrateAttempt : bitrateAttempts) {
-            HRESULT hr = tryConfigure(
-                useDefaultProfile,
-                profileLevel,
-                bitrateAttempt.useDefaultBitrate,
-                bitrateAttempt.avgBitrate);
+    auto runAttempts = [&](bool disableConverters, bool requireExactOutput) -> HRESULT {
+        for (UINT32 profileLevel : profileLevelCandidates) {
+            const bool useDefaultProfile = (profileLevel == 0);
+            for (const auto& bitrateAttempt : bitrateAttempts) {
+                HRESULT hr = tryConfigure(
+                    useDefaultProfile,
+                    profileLevel,
+                    bitrateAttempt.useDefaultBitrate,
+                    bitrateAttempt.avgBitrate,
+                    disableConverters,
+                    requireExactOutput);
 
-            if (SUCCEEDED(hr)) {
-                if (useDefaultProfile) {
-                    std::cout << "Record: AAC profile-level selected by Media Foundation defaults." << std::endl;
-                } else {
-                    std::cout << "Record: AAC profile-level set to 0x" << std::hex
-                              << profileLevel << std::dec << "." << std::endl;
+                if (SUCCEEDED(hr)) {
+                    if (useDefaultProfile) {
+                        std::cout << "Record: AAC profile-level selected by Media Foundation defaults." << std::endl;
+                    } else {
+                        std::cout << "Record: AAC profile-level set to 0x" << std::hex
+                                  << profileLevel << std::dec << "." << std::endl;
+                    }
+
+                    if (bitrateAttempt.useDefaultBitrate) {
+                        std::cout << "Record: AAC bitrate selected by Media Foundation defaults." << std::endl;
+                    } else {
+                        std::cout << "Record: AAC bitrate selected " << bitrateAttempt.avgBitrate << " bps." << std::endl;
+                    }
+
+                    std::cout << "Record: AAC output negotiated " << negotiatedOutputInfo.sampleRate
+                              << " Hz, " << negotiatedOutputInfo.channels << " channel(s)." << std::endl;
+                    if (negotiatedOutputInfo.hasProfileLevel) {
+                        std::cout << "Record: AAC negotiated profile-level 0x"
+                                  << std::hex << negotiatedOutputInfo.profileLevel << std::dec << "." << std::endl;
+                    } else {
+                        std::cout << "Record: AAC negotiated profile-level not provided by encoder." << std::endl;
+                    }
+                    if (negotiatedOutputInfo.hasAvgBitrate) {
+                        std::cout << "Record: AAC negotiated bitrate " << negotiatedOutputInfo.avgBitrate << " bps." << std::endl;
+                    }
+                    return hr;
                 }
 
+                lastHr = hr;
                 if (bitrateAttempt.useDefaultBitrate) {
-                    std::cout << "Record: AAC bitrate selected by Media Foundation defaults." << std::endl;
+                    std::cerr << "Record: AAC attempt failed for profile "
+                              << (useDefaultProfile ? "default" : "explicit")
+                              << " and bitrate default: " << hr << std::endl;
                 } else {
-                    std::cout << "Record: AAC bitrate selected " << bitrateAttempt.avgBitrate << " bps." << std::endl;
+                    std::cerr << "Record: AAC attempt failed for profile "
+                              << (useDefaultProfile ? "default" : "explicit")
+                              << " and bitrate " << bitrateAttempt.avgBitrate
+                              << " bps: " << hr << std::endl;
                 }
-
-                std::cout << "Record: AAC output target " << m_sampleRate
-                          << " Hz, " << m_channels << " channel(s)." << std::endl;
-                return hr;
-            }
-
-            lastHr = hr;
-            if (bitrateAttempt.useDefaultBitrate) {
-                std::cerr << "Record: AAC attempt failed for profile "
-                          << (useDefaultProfile ? "default" : "explicit")
-                          << " and bitrate default: " << hr << std::endl;
-            } else {
-                std::cerr << "Record: AAC attempt failed for profile "
-                          << (useDefaultProfile ? "default" : "explicit")
-                          << " and bitrate " << bitrateAttempt.avgBitrate
-                          << " bps: " << hr << std::endl;
             }
         }
+        return lastHr;
+    };
+
+    HRESULT hr = runAttempts(true, true);
+    if (SUCCEEDED(hr)) {
+        return hr;
     }
 
-    std::cerr << "ConfigSinkWriter failed at step Setup: " << lastHr << std::endl;
-    return lastHr;
+    std::cerr << "Record: Exact AAC output not supported by this encoder/device combo. "
+              << "Falling back to permissive AAC negotiation." << std::endl;
+    hr = runAttempts(false, false);
+    if (SUCCEEDED(hr)) {
+        return hr;
+    }
+
+    std::cerr << "ConfigSinkWriter failed at step Setup: " << hr << std::endl;
+    return hr;
 }
 
 bool AacEncoder::EncodeFrame(const int16_t* pcm, int frameSize) {
