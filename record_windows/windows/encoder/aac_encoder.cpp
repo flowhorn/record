@@ -23,6 +23,12 @@ struct NegotiatedAacOutputInfo {
     UINT32 avgBitrate = 0;
 };
 
+static bool IsHeLikeAacProfileLevel(UINT32 profileLevel) {
+    // On Windows MF, 0x28 commonly maps to an HE-AAC style profile that can
+    // present doubled sample rate / stereo-style signaling in metadata.
+    return profileLevel == 0x28;
+}
+
 static HRESULT GetNegotiatedAacOutputInfo(
     IMFSinkWriter* pSinkWriter,
     DWORD streamIndex,
@@ -220,7 +226,8 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
                             bool disableConverters,
                             bool requireExactOutput,
                             bool requireRequestedChannels,
-                            bool allowVeryLowAutoBitrate) -> HRESULT {
+                            bool allowVeryLowAutoBitrate,
+                            bool disallowHeLikeProfile) -> HRESULT {
         IMFSinkWriter* pSinkWriter = NULL;
         IMFAttributes* pSinkWriterAttributes = NULL;
         IMFMediaType* pMediaTypeOut = NULL;
@@ -394,6 +401,14 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
                                   << std::endl;
                         hr = MF_E_INVALIDMEDIATYPE;
                     }
+                } else if (disallowHeLikeProfile &&
+                           info.hasProfileLevel &&
+                           IsHeLikeAacProfileLevel(info.profileLevel)) {
+                    std::cerr << "Record: AAC negotiated profile-level 0x"
+                              << std::hex << info.profileLevel << std::dec
+                              << " is HE-like and may expose 32kHz/stereo-style metadata. "
+                              << "Retrying non-HE profile options first." << std::endl;
+                    hr = MF_E_INVALIDMEDIATYPE;
                 }
             } else {
                 std::cerr << "Record: Failed to query negotiated AAC output type: "
@@ -423,7 +438,8 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
                            bool disableConverters,
                            bool requireExactOutput,
                            bool requireRequestedChannels,
-                           bool allowVeryLowAutoBitrate) -> HRESULT {
+                           bool allowVeryLowAutoBitrate,
+                           bool disallowHeLikeProfile) -> HRESULT {
         std::cout << "Record: AAC negotiation pass '" << passName << "' started." << std::endl;
         for (const auto& formatAttempt : outputFormatAttempts) {
             if (requireExactOutput && !formatAttempt.exactRequested) {
@@ -467,7 +483,8 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
                         disableConverters,
                         requireExactOutput,
                         requireRequestedChannels,
-                        allowVeryLowAutoBitrate);
+                        allowVeryLowAutoBitrate,
+                        disallowHeLikeProfile);
 
                     if (SUCCEEDED(hr)) {
                         if (useDefaultProfile) {
@@ -490,6 +507,11 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
                         if (negotiatedOutputInfo.hasProfileLevel) {
                             std::cout << "Record: AAC negotiated profile-level 0x"
                                       << std::hex << negotiatedOutputInfo.profileLevel << std::dec << "." << std::endl;
+                            if (IsHeLikeAacProfileLevel(negotiatedOutputInfo.profileLevel)) {
+                                std::cout << "Record: AAC profile is HE-like; some tools may report "
+                                          << "effective 32kHz/stereo metadata for low-rate sources."
+                                          << std::endl;
+                            }
                         } else {
                             std::cout << "Record: AAC negotiated profile-level not provided by encoder." << std::endl;
                         }
@@ -514,28 +536,28 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
         return lastHr;
     };
 
-    HRESULT hr = runAttempts("exact", true, true, true, false);
+    HRESULT hr = runAttempts("exact", true, true, true, false, true);
     if (SUCCEEDED(hr)) {
         return hr;
     }
 
     std::cerr << "Record: Exact AAC output not supported by this encoder/device combo. "
               << "Falling back to channel-preserving AAC negotiation." << std::endl;
-    hr = runAttempts("channel-preserving", true, false, true, false);
+    hr = runAttempts("channel-preserving", true, false, true, false, true);
     if (SUCCEEDED(hr)) {
         return hr;
     }
 
     std::cerr << "Record: Channel-preserving AAC negotiation not supported. "
-              << "Falling back to fully compatible AAC negotiation." << std::endl;
-    hr = runAttempts("compatible", true, false, false, false);
+              << "Falling back to fully compatible non-HE AAC negotiation." << std::endl;
+    hr = runAttempts("compatible", true, false, false, false, true);
     if (SUCCEEDED(hr)) {
         return hr;
     }
 
-    std::cerr << "Record: Explicit AAC output types unavailable. "
-              << "Trying converter-enabled compatibility fallback." << std::endl;
-    hr = runAttempts("compatible-converters", false, false, false, false);
+    std::cerr << "Record: Non-HE AAC negotiation unavailable. "
+              << "Trying converter-enabled HE-compatible fallback." << std::endl;
+    hr = runAttempts("compatible-converters", false, false, false, false, false);
     if (SUCCEEDED(hr)) {
         return hr;
     }
@@ -543,7 +565,7 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
     if (m_bitrate <= 0) {
         std::cerr << "Record: Preferred auto-bitrate floor could not be met. "
                   << "Allowing very low auto bitrate as last resort." << std::endl;
-        hr = runAttempts("compatible-low-bitrate", false, false, false, true);
+        hr = runAttempts("compatible-low-bitrate", false, false, false, true, false);
         if (SUCCEEDED(hr)) {
             return hr;
         }

@@ -7,6 +7,7 @@
 #include <iostream>
 #include <algorithm>
 #include <cmath>
+#include <set>
 
 namespace record_windows {
 
@@ -581,6 +582,40 @@ HRESULT Recorder::InitRecording(std::unique_ptr<RecordConfig> config) {
 
     bool targetRateSupported = true;
     bool targetChannelsSupported = true;
+
+    if (!hasSelectedDevice && m_pConfig && m_pConfig->encoderName == AudioEncoder().aacLc) {
+        ma_device_info defaultDeviceInfo;
+        if (ma_context_get_device_info(&m_context, ma_device_type_capture, NULL, &defaultDeviceInfo) == MA_SUCCESS) {
+            std::set<ma_uint32> defaultRates;
+            std::set<ma_uint32> defaultChannels;
+            for (ma_uint32 i = 0; i < defaultDeviceInfo.nativeDataFormatCount; ++i) {
+                const auto fmt = defaultDeviceInfo.nativeDataFormats[i];
+                if (fmt.format != ma_format_s16 && fmt.format != ma_format_f32 &&
+                    fmt.format != ma_format_s32 && fmt.format != ma_format_u8) {
+                    continue;
+                }
+                if (fmt.sampleRate > 0) defaultRates.insert(fmt.sampleRate);
+                if (fmt.channels > 0) defaultChannels.insert(fmt.channels);
+            }
+
+            std::cout << "Record: Default capture device native formats: "
+                      << defaultDeviceInfo.nativeDataFormatCount << std::endl;
+            if (!defaultRates.empty()) {
+                std::cout << "Record: Default capture device sample rates:";
+                for (auto rate : defaultRates) {
+                    std::cout << " " << rate;
+                }
+                std::cout << std::endl;
+            }
+            if (!defaultChannels.empty()) {
+                std::cout << "Record: Default capture device channels:";
+                for (auto ch : defaultChannels) {
+                    std::cout << " " << ch;
+                }
+                std::cout << std::endl;
+            }
+        }
+    }
 
     if (hasSelectedDevice) {
         ma_device_info deviceInfo;
