@@ -1,4 +1,5 @@
 #include "aac_encoder.h"
+#include "aac_container_negotiation.h"
 #include <iostream>
 
 template <class T> void SafeRelease(T **ppT)
@@ -11,29 +12,6 @@ template <class T> void SafeRelease(T **ppT)
 }
 
 namespace record_windows {
-
-static UINT32 SelectAacBytesPerSecond(int bitrate, int channels) {
-    std::vector<UINT32> supported = {12000, 16000, 20000, 24000};
-    if (channels == 6) {
-        for (auto& v : supported) v *= 6;
-    }
-
-    if (bitrate <= 0) {
-        return supported.front();
-    }
-
-    UINT32 target = static_cast<UINT32>(bitrate / 8);
-    UINT32 best = supported.front();
-    UINT32 bestDiff = std::abs((int)target - (int)best);
-    for (auto v : supported) {
-        UINT32 diff = std::abs((int)target - (int)v);
-        if (diff < bestDiff) {
-            bestDiff = diff;
-            best = v;
-        }
-    }
-    return best;
-}
 
 AacEncoder::AacEncoder() {
     HRESULT hr = MFStartup(MF_VERSION);
@@ -71,8 +49,7 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
     IMFMediaType* pMediaTypeOut = NULL;
     IMFMediaType* pMediaTypeIn = NULL;
 
-    const UINT32 bytesPerSecond = SelectAacBytesPerSecond(m_bitrate, m_channels);
-    const UINT32 avgBitrate = bytesPerSecond * 8;
+    const auto bitrateCandidates = BuildAacBitrateCandidates(m_bitrate, m_sampleRate, m_channels);
     
     // Create the sink writer
     // Note: This relies on the file extension to select the container (e.g. .m4a)
@@ -105,32 +82,72 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
     }
     
     if (SUCCEEDED(hr)) {
-        hr = pMediaTypeOut->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-        if (FAILED(hr)) std::cerr << "SetUINT32 BitsPerSample Out failed: " << hr << std::endl;
-    }
-
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeOut->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bytesPerSecond);
-        if (FAILED(hr)) std::cerr << "SetUINT32 Bitrate Out failed: " << hr << std::endl;
-    }
-
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeOut->SetUINT32(MF_MT_AVG_BITRATE, avgBitrate);
-        if (FAILED(hr)) std::cerr << "SetUINT32 AvgBitrate Out failed: " << hr << std::endl;
-    }
-
-    if (SUCCEEDED(hr)) {
         hr = pMediaTypeOut->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE, 0);
         if (FAILED(hr)) std::cerr << "SetUINT32 PayloadType Out failed: " << hr << std::endl;
     }
 
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeOut->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29);
-        if (FAILED(hr)) std::cerr << "SetUINT32 AACProfile Out failed: " << hr << std::endl;
-    }
+    // Prefer explicit AAC-LC profile-level signaling and fall back to
+    // unspecified profile-level only if stream creation fails.
     
     if (SUCCEEDED(hr)) {
-        hr = pSinkWriter->AddStream(pMediaTypeOut, &m_streamIndex);
+        HRESULT addStreamHr = E_FAIL;
+        const std::vector<UINT32> profileLevelCandidates = {0x29, 0};
+
+        for (UINT32 profileLevel : profileLevelCandidates) {
+            if (profileLevel == 0) {
+                pMediaTypeOut->DeleteItem(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION);
+            } else {
+                HRESULT profileHr = pMediaTypeOut->SetUINT32(
+                    MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, profileLevel);
+                if (FAILED(profileHr)) {
+                    continue;
+                }
+            }
+
+            for (uint32_t candidateBitrate : bitrateCandidates) {
+                const UINT32 avgBitrate = static_cast<UINT32>(candidateBitrate);
+                const UINT32 bytesPerSecond = avgBitrate / 8;
+
+                HRESULT setHr = pMediaTypeOut->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bytesPerSecond);
+                if (FAILED(setHr)) {
+                    continue;
+                }
+
+                setHr = pMediaTypeOut->SetUINT32(MF_MT_AVG_BITRATE, avgBitrate);
+                if (FAILED(setHr)) {
+                    continue;
+                }
+
+                addStreamHr = pSinkWriter->AddStream(pMediaTypeOut, &m_streamIndex);
+                if (SUCCEEDED(addStreamHr)) {
+                    if (profileLevel == 0) {
+                        std::cout << "Record: AAC profile-level selected by Media Foundation defaults." << std::endl;
+                    } else {
+                        std::cout << "Record: AAC profile-level set to 0x" << std::hex
+                                  << profileLevel << std::dec << "." << std::endl;
+                    }
+                    std::cout << "Record: AAC bitrate selected " << avgBitrate << " bps." << std::endl;
+                    break;
+                }
+            }
+
+            if (SUCCEEDED(addStreamHr)) {
+                break;
+            }
+        }
+
+        if (FAILED(addStreamHr)) {
+            // Last fallback: let MF choose profile-level and bitrate.
+            pMediaTypeOut->DeleteItem(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION);
+            pMediaTypeOut->DeleteItem(MF_MT_AUDIO_AVG_BYTES_PER_SECOND);
+            pMediaTypeOut->DeleteItem(MF_MT_AVG_BITRATE);
+            addStreamHr = pSinkWriter->AddStream(pMediaTypeOut, &m_streamIndex);
+            if (SUCCEEDED(addStreamHr)) {
+                std::cout << "Record: AAC profile-level and bitrate selected by Media Foundation defaults." << std::endl;
+            }
+        }
+
+        hr = addStreamHr;
         if (FAILED(hr)) std::cerr << "AddStream failed: " << hr << std::endl;
     }
     

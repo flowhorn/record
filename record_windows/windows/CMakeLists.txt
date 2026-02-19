@@ -23,6 +23,8 @@ list(APPEND PLUGIN_SOURCES
   "encoder/encoders.h"
   "encoder/aac_encoder.h"
   "encoder/aac_encoder.cpp"
+  "encoder/aac_container_negotiation.h"
+  "encoder/aac_container_negotiation.cpp"
   "utils.h"
   "event_stream_handler.h"
 )
