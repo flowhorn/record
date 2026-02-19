@@ -47,6 +47,7 @@ bool AacEncoder::Initialize(const std::wstring& path, int sampleRate, int channe
 HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
     const auto bitrateCandidates = BuildAacBitrateCandidates(m_bitrate, m_sampleRate, m_channels);
     const std::vector<UINT32> profileLevelCandidates = {0x29, 0};
+    const bool preferDefaultBitrate = (m_bitrate <= 0) || (m_sampleRate <= 16000);
     HRESULT lastHr = E_FAIL;
 
     auto tryConfigure = [&](bool useDefaultProfile, UINT32 profileLevel, bool useDefaultBitrate, UINT32 avgBitrate) -> HRESULT {
@@ -198,11 +199,32 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
         return hr;
     };
 
+    struct BitrateAttempt {
+        bool useDefaultBitrate;
+        UINT32 avgBitrate;
+    };
+
+    std::vector<BitrateAttempt> bitrateAttempts;
+    bitrateAttempts.reserve(bitrateCandidates.size() + 1);
+    if (preferDefaultBitrate) {
+        bitrateAttempts.push_back({true, 0});
+    }
+    for (uint32_t candidateBitrate : bitrateCandidates) {
+        bitrateAttempts.push_back({false, static_cast<UINT32>(candidateBitrate)});
+    }
+    if (!preferDefaultBitrate) {
+        bitrateAttempts.push_back({true, 0});
+    }
+
     for (UINT32 profileLevel : profileLevelCandidates) {
         const bool useDefaultProfile = (profileLevel == 0);
-        for (uint32_t candidateBitrate : bitrateCandidates) {
-            const UINT32 avgBitrate = static_cast<UINT32>(candidateBitrate);
-            HRESULT hr = tryConfigure(useDefaultProfile, profileLevel, false, avgBitrate);
+        for (const auto& bitrateAttempt : bitrateAttempts) {
+            HRESULT hr = tryConfigure(
+                useDefaultProfile,
+                profileLevel,
+                bitrateAttempt.useDefaultBitrate,
+                bitrateAttempt.avgBitrate);
+
             if (SUCCEEDED(hr)) {
                 if (useDefaultProfile) {
                     std::cout << "Record: AAC profile-level selected by Media Foundation defaults." << std::endl;
@@ -210,25 +232,32 @@ HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
                     std::cout << "Record: AAC profile-level set to 0x" << std::hex
                               << profileLevel << std::dec << "." << std::endl;
                 }
-                std::cout << "Record: AAC bitrate selected " << avgBitrate << " bps." << std::endl;
+
+                if (bitrateAttempt.useDefaultBitrate) {
+                    std::cout << "Record: AAC bitrate selected by Media Foundation defaults." << std::endl;
+                } else {
+                    std::cout << "Record: AAC bitrate selected " << bitrateAttempt.avgBitrate << " bps." << std::endl;
+                }
+
+                std::cout << "Record: AAC output target " << m_sampleRate
+                          << " Hz, " << m_channels << " channel(s)." << std::endl;
                 return hr;
             }
 
             lastHr = hr;
-            std::cerr << "Record: AAC attempt failed for profile "
-                      << (useDefaultProfile ? "default" : "explicit")
-                      << " and bitrate " << avgBitrate
-                      << " bps: " << hr << std::endl;
+            if (bitrateAttempt.useDefaultBitrate) {
+                std::cerr << "Record: AAC attempt failed for profile "
+                          << (useDefaultProfile ? "default" : "explicit")
+                          << " and bitrate default: " << hr << std::endl;
+            } else {
+                std::cerr << "Record: AAC attempt failed for profile "
+                          << (useDefaultProfile ? "default" : "explicit")
+                          << " and bitrate " << bitrateAttempt.avgBitrate
+                          << " bps: " << hr << std::endl;
+            }
         }
     }
 
-    HRESULT hr = tryConfigure(true, 0, true, 0);
-    if (SUCCEEDED(hr)) {
-        std::cout << "Record: AAC profile-level and bitrate selected by Media Foundation defaults." << std::endl;
-        return hr;
-    }
-
-    lastHr = hr;
     std::cerr << "ConfigSinkWriter failed at step Setup: " << lastHr << std::endl;
     return lastHr;
 }
