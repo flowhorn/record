@@ -1,17 +1,12 @@
 #pragma once
 
-#include <windows.h>
-#include <mfapi.h>
-#include <mfidl.h>
-#include <mfreadwrite.h>
-#include <mferror.h>
+#include <aacenc_lib.h>
+
+#include <cstdint>
+#include <fstream>
 #include <string>
 #include <vector>
 #include <mutex>
-
-#pragma comment(lib, "mfplat.lib")
-#pragma comment(lib, "mfreadwrite.lib")
-#pragma comment(lib, "mfuuid.lib")
 
 namespace record_windows {
 
@@ -25,20 +20,21 @@ public:
     void Finalize();
     
 private:
-    IMFSinkWriter* m_pSinkWriter = NULL;
-    DWORD m_streamIndex = 0;
+    HANDLE_AACENCODER m_encoder = nullptr;
+    std::ofstream m_outputFile;
+    std::vector<uint8_t> m_outputBuffer;
     
     int m_sampleRate = 44100;
     int m_channels = 2;
     int m_bitrate = 128000;
-    
-    long long m_duration = 0;
+    int m_frameSize = 1024;
     
     bool m_initialized = false;
     std::mutex m_mutex;
-    
-    HRESULT ConfigSinkWriter(const std::wstring& path);
-    HRESULT WriteSample(IMFSample* pSample);
+
+    bool ConfigureEncoder();
+    bool EncodeInternal(const INT_PCM* pcm, int numInSamples);
+    void FlushEncoder();
 };
 
 } // namespace record_windows

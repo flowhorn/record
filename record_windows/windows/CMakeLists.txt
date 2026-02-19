@@ -12,6 +12,13 @@ project(${PROJECT_NAME} LANGUAGES CXX C)
 # not be changed
 set(PLUGIN_NAME "record_windows_plugin")
 
+# Bundle libfdk-aac and build it statically for the plugin.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static fdk-aac" FORCE)
+set(BUILD_PROGRAMS OFF CACHE BOOL "Disable fdk-aac tools" FORCE)
+set(FDK_AAC_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "Disable fdk-aac install config" FORCE)
+set(FDK_AAC_INSTALL_PKGCONFIG_MODULE OFF CACHE BOOL "Disable fdk-aac pkgconfig" FORCE)
+add_subdirectory("third_party/fdk-aac" EXCLUDE_FROM_ALL)
+
 # Any new source files that you add to the plugin should be added here.
 list(APPEND PLUGIN_SOURCES
   "record_windows_plugin.cpp"
@@ -74,7 +81,7 @@ if(MSVC)
   target_link_options(${PLUGIN_NAME} PRIVATE "/NODEFAULTLIB:LIBCMT" "/IGNORE:4099" "/IGNORE:4098" "/IGNORE:4075")
 endif()
 
-target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin mfplat mfreadwrite mfuuid)
+target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin fdk-aac)
 
 # List of absolute paths to libraries that should be bundled with the plugin.
 # This list could contain prebuilt libraries, or libraries created by an

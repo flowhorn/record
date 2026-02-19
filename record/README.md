@@ -4,7 +4,7 @@ No external dependencies:
 
 - On Android, AudioRecord and MediaCodec or MediaRecorder.
 - On iOS and macOS, AVFoundation.
-- On Windows, MediaFoundation.
+- On Windows, miniaudio + bundled libfdk-aac.
 - On web, well... your browser! (and its underlying platform).
 
 External dependencies:

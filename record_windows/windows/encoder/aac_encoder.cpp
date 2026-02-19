@@ -1,309 +1,250 @@
 #include "aac_encoder.h"
-#include <iostream>
 
-template <class T> void SafeRelease(T **ppT)
-{
-    if (*ppT)
-    {
-        (*ppT)->Release();
-        *ppT = NULL;
-    }
-}
+#include <filesystem>
+#include <iostream>
 
 namespace record_windows {
 
-static UINT32 SelectAacBytesPerSecond(int bitrate, int channels) {
-    std::vector<UINT32> supported = {12000, 16000, 20000, 24000};
-    if (channels == 6) {
-        for (auto& v : supported) v *= 6;
-    }
+namespace {
 
-    if (bitrate <= 0) {
-        return supported.front();
+CHANNEL_MODE ChannelModeFromCount(int channels) {
+    switch (channels) {
+    case 1:
+        return MODE_1;
+    case 2:
+        return MODE_2;
+    default:
+        return MODE_INVALID;
     }
-
-    UINT32 target = static_cast<UINT32>(bitrate / 8);
-    UINT32 best = supported.front();
-    UINT32 bestDiff = std::abs((int)target - (int)best);
-    for (auto v : supported) {
-        UINT32 diff = std::abs((int)target - (int)v);
-        if (diff < bestDiff) {
-            bestDiff = diff;
-            best = v;
-        }
-    }
-    return best;
 }
 
-AacEncoder::AacEncoder() {
-    HRESULT hr = MFStartup(MF_VERSION);
-    if (FAILED(hr)) {
-        std::cerr << "MFStartup failed: " << hr << std::endl;
-    }
+int DefaultBitrateFor(int channels) {
+    return channels == 1 ? 64000 : 128000;
 }
+
+} // namespace
+
+AacEncoder::AacEncoder() = default;
 
 AacEncoder::~AacEncoder() {
     Finalize();
-    MFShutdown();
 }
 
 bool AacEncoder::Initialize(const std::wstring& path, int sampleRate, int channels, int bitrate) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     if (m_initialized) {
-        Finalize();
+        FlushEncoder();
+        if (m_encoder != nullptr) {
+            aacEncClose(&m_encoder);
+        }
+        if (m_outputFile.is_open()) {
+            m_outputFile.close();
+        }
+        m_outputBuffer.clear();
+        m_initialized = false;
     }
-    
+
     m_sampleRate = sampleRate;
     m_channels = channels;
-    m_bitrate = bitrate;
-    m_duration = 0;
-    
-    HRESULT hr = ConfigSinkWriter(path);
-    if (SUCCEEDED(hr)) {
-        m_initialized = true;
-        return true;
+    m_bitrate = bitrate > 0 ? bitrate : DefaultBitrateFor(channels);
+    m_frameSize = 1024;
+
+    const CHANNEL_MODE channelMode = ChannelModeFromCount(m_channels);
+    if (channelMode == MODE_INVALID) {
+        std::cerr << "AacEncoder: Unsupported channel count: " << m_channels << std::endl;
+        return false;
     }
-    
-    return false;
+
+    m_outputFile.open(std::filesystem::path(path), std::ios::binary | std::ios::trunc);
+    if (!m_outputFile.is_open()) {
+        std::cerr << "AacEncoder: Failed to open output file." << std::endl;
+        return false;
+    }
+
+    if (!ConfigureEncoder()) {
+        if (m_outputFile.is_open()) {
+            m_outputFile.close();
+        }
+        return false;
+    }
+
+    m_initialized = true;
+    return true;
 }
 
-HRESULT AacEncoder::ConfigSinkWriter(const std::wstring& path) {
-    IMFSinkWriter* pSinkWriter = NULL;
-    IMFMediaType* pMediaTypeOut = NULL;
-    IMFMediaType* pMediaTypeIn = NULL;
-
-    const UINT32 bytesPerSecond = SelectAacBytesPerSecond(m_bitrate, m_channels);
-    const UINT32 avgBitrate = bytesPerSecond * 8;
-    
-    // Create the sink writer
-    // Note: This relies on the file extension to select the container (e.g. .m4a)
-    HRESULT hr = MFCreateSinkWriterFromURL(path.c_str(), NULL, NULL, &pSinkWriter);
-    
-    // Configure output media type (AAC)
-    if (SUCCEEDED(hr)) {
-        hr = MFCreateMediaType(&pMediaTypeOut);
-        if (FAILED(hr)) std::cerr << "MFCreateMediaType Out failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeOut->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-        if (FAILED(hr)) std::cerr << "SetGUID MF_MT_MAJOR_TYPE Out failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeOut->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
-        if (FAILED(hr)) std::cerr << "SetGUID MFAudioFormat_AAC failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeOut->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, m_channels);
-        if (FAILED(hr)) std::cerr << "SetUINT32 Channels Out failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeOut->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, m_sampleRate);
-        if (FAILED(hr)) std::cerr << "SetUINT32 SampleRate Out failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeOut->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-        if (FAILED(hr)) std::cerr << "SetUINT32 BitsPerSample Out failed: " << hr << std::endl;
+bool AacEncoder::ConfigureEncoder() {
+    AACENC_ERROR err = aacEncOpen(&m_encoder, 0, static_cast<UINT>(m_channels));
+    if (err != AACENC_OK) {
+        std::cerr << "AacEncoder: aacEncOpen failed: " << err << std::endl;
+        return false;
     }
 
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeOut->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bytesPerSecond);
-        if (FAILED(hr)) std::cerr << "SetUINT32 Bitrate Out failed: " << hr << std::endl;
-    }
+    const CHANNEL_MODE channelMode = ChannelModeFromCount(m_channels);
+    const struct {
+        AACENC_PARAM param;
+        UINT value;
+        const char* name;
+    } params[] = {
+        {AACENC_AOT, static_cast<UINT>(AOT_AAC_LC), "AACENC_AOT"},
+        {AACENC_SAMPLERATE, static_cast<UINT>(m_sampleRate), "AACENC_SAMPLERATE"},
+        {AACENC_CHANNELMODE, static_cast<UINT>(channelMode), "AACENC_CHANNELMODE"},
+        {AACENC_CHANNELORDER, 1u, "AACENC_CHANNELORDER"},
+        {AACENC_BITRATE, static_cast<UINT>(m_bitrate), "AACENC_BITRATE"},
+        {AACENC_TRANSMUX, static_cast<UINT>(TT_MP4_ADTS), "AACENC_TRANSMUX"},
+        {AACENC_AFTERBURNER, 1u, "AACENC_AFTERBURNER"},
+    };
 
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeOut->SetUINT32(MF_MT_AVG_BITRATE, avgBitrate);
-        if (FAILED(hr)) std::cerr << "SetUINT32 AvgBitrate Out failed: " << hr << std::endl;
-    }
-
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeOut->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE, 0);
-        if (FAILED(hr)) std::cerr << "SetUINT32 PayloadType Out failed: " << hr << std::endl;
-    }
-
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeOut->SetUINT32(MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29);
-        if (FAILED(hr)) std::cerr << "SetUINT32 AACProfile Out failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pSinkWriter->AddStream(pMediaTypeOut, &m_streamIndex);
-        if (FAILED(hr)) std::cerr << "AddStream failed: " << hr << std::endl;
-    }
-    
-    // Configure input media type (PCM)
-    if (SUCCEEDED(hr)) {
-        hr = MFCreateMediaType(&pMediaTypeIn);
-        if (FAILED(hr)) std::cerr << "MFCreateMediaType In failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeIn->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-        if (FAILED(hr)) std::cerr << "SetGUID MF_MT_MAJOR_TYPE In failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeIn->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-        if (FAILED(hr)) std::cerr << "SetGUID MFAudioFormat_PCM failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-        if (FAILED(hr)) std::cerr << "SetUINT32 BitsPerSample In failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, m_sampleRate);
-        if (FAILED(hr)) std::cerr << "SetUINT32 SampleRate In failed: " << hr << std::endl;
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, m_channels);
-        if (FAILED(hr)) std::cerr << "SetUINT32 Channels In failed: " << hr << std::endl;
-    }
-
-    if (SUCCEEDED(hr)) {
-        hr = pMediaTypeIn->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
-        if (FAILED(hr)) std::cerr << "SetUINT32 AllSamplesIndependent In failed: " << hr << std::endl;
-    }
-
-    // PCM requires Block Alignment and Avg Bytes/Sec for strict definition
-    if (SUCCEEDED(hr)) {
-        UINT32 blockAlign = m_channels * 2; // 16 bits = 2 bytes
-        hr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, blockAlign);
-        if (FAILED(hr)) std::cerr << "SetUINT32 BlockAlignment In failed: " << hr << std::endl;
-        
-        if (SUCCEEDED(hr)) {
-            hr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, m_sampleRate * blockAlign);
-            if (FAILED(hr)) std::cerr << "SetUINT32 AvgBytesPerSecond In failed: " << hr << std::endl;
+    for (const auto& p : params) {
+        err = aacEncoder_SetParam(m_encoder, p.param, p.value);
+        if (err != AACENC_OK) {
+            std::cerr << "AacEncoder: " << p.name << " failed: " << err << std::endl;
+            aacEncClose(&m_encoder);
+            return false;
         }
     }
-    
-    // Often required for strict topology building
-    if (SUCCEEDED(hr) && m_channels > 0 && m_channels <= 2) {
-       DWORD channelMask = (m_channels == 2) ? 3 : 4; // Stereo (FL|FR) or Mono (FC). 3=0x3, 4=0x4 is actually FL. Mono usually 4 (FC) or 3?
-       // WAVE_FORMAT_PCM default mask logic:
-       // 1 channel: SPEAKER_FRONT_CENTER (0x4)
-       // 2 channels: SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT (0x3)
-       if (m_channels == 1) channelMask = 0x4; // FC
-       if (m_channels == 2) channelMask = 0x3; // FL|FR
-       
-       // Note: Some encoders ignore this, others require it
-       // Let's try setting it if it's unset
-       hr = pMediaTypeIn->SetUINT32(MF_MT_AUDIO_CHANNEL_MASK, channelMask);
-       if (FAILED(hr)) {
-           std::cerr << "SetUINT32 ChannelMask In failed (ignoring): " << hr << std::endl;
-           hr = S_OK; // Ignore failure here as it might be optional
-       }
+
+    err = aacEncEncode(m_encoder, nullptr, nullptr, nullptr, nullptr);
+    if (err != AACENC_OK) {
+        std::cerr << "AacEncoder: Initial aacEncEncode failed: " << err << std::endl;
+        aacEncClose(&m_encoder);
+        return false;
     }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pSinkWriter->SetInputMediaType(m_streamIndex, pMediaTypeIn, NULL);
-        if (FAILED(hr)) std::cerr << "SetInputMediaType failed (Likely format mismatch): " << hr << std::endl;
+
+    AACENC_InfoStruct info = {};
+    err = aacEncInfo(m_encoder, &info);
+    if (err != AACENC_OK) {
+        std::cerr << "AacEncoder: aacEncInfo failed: " << err << std::endl;
+        aacEncClose(&m_encoder);
+        return false;
     }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pSinkWriter->BeginWriting();
-        if (FAILED(hr)) std::cerr << "BeginWriting failed: " << hr << std::endl;
+
+    if (info.frameLength > 0) {
+        m_frameSize = static_cast<int>(info.frameLength);
     }
-    
-    if (SUCCEEDED(hr)) {
-        m_pSinkWriter = pSinkWriter;
-        m_pSinkWriter->AddRef();
-    } else {
-        std::cerr << "ConfigSinkWriter failed at step " << (pSinkWriter ? "Setup" : "Creation") << ": " << hr << std::endl;
-        
-        // Detailed error check
-        if (!pSinkWriter) std::cerr << "MFCreateSinkWriterFromURL failed" << std::endl;
-        else if (!pMediaTypeOut) std::cerr << "MFCreateMediaType (Out) failed" << std::endl;
-        else if (!pMediaTypeIn) std::cerr << "MFCreateMediaType (In) failed" << std::endl;
-    }
-    
-    SafeRelease(&pSinkWriter);
-    SafeRelease(&pMediaTypeOut);
-    SafeRelease(&pMediaTypeIn);
-    
-    return hr;
+
+    m_outputBuffer.resize(8192);
+    return true;
 }
 
 bool AacEncoder::EncodeFrame(const int16_t* pcm, int frameSize) {
-    if (!m_initialized || !m_pSinkWriter) return false;
-    
+    if (!pcm || frameSize <= 0) {
+        return false;
+    }
+
     std::lock_guard<std::mutex> lock(m_mutex);
-    
-    IMFSample* pSample = NULL;
-    IMFMediaBuffer* pBuffer = NULL;
-    
-    const DWORD cbBuffer = frameSize * m_channels * sizeof(int16_t);
-    BYTE* pData = NULL;
-    
-    // Create a new memory buffer
-    HRESULT hr = MFCreateMemoryBuffer(cbBuffer, &pBuffer);
-    
-    // Lock the buffer and copy the data
-    if (SUCCEEDED(hr)) {
-        hr = pBuffer->Lock(&pData, NULL, NULL);
+    if (!m_initialized || m_encoder == nullptr || !m_outputFile.is_open()) {
+        return false;
     }
-    
-    if (SUCCEEDED(hr)) {
-        memcpy(pData, pcm, cbBuffer);
-        hr = pBuffer->Unlock();
+
+    const int numInSamples = frameSize * m_channels;
+    return EncodeInternal(reinterpret_cast<const INT_PCM*>(pcm), numInSamples);
+}
+
+bool AacEncoder::EncodeInternal(const INT_PCM* pcm, int numInSamples) {
+    void* inBuffer = const_cast<INT_PCM*>(pcm);
+    INT inIdentifier = IN_AUDIO_DATA;
+    INT inElemSize = static_cast<INT>(sizeof(INT_PCM));
+    INT inSize = numInSamples * inElemSize;
+    AACENC_BufDesc inDesc = {};
+    inDesc.numBufs = 1;
+    inDesc.bufs = &inBuffer;
+    inDesc.bufferIdentifiers = &inIdentifier;
+    inDesc.bufSizes = &inSize;
+    inDesc.bufElSizes = &inElemSize;
+
+    void* outBuffer = m_outputBuffer.data();
+    INT outIdentifier = OUT_BITSTREAM_DATA;
+    INT outElemSize = 1;
+    INT outSize = static_cast<INT>(m_outputBuffer.size());
+    AACENC_BufDesc outDesc = {};
+    outDesc.numBufs = 1;
+    outDesc.bufs = &outBuffer;
+    outDesc.bufferIdentifiers = &outIdentifier;
+    outDesc.bufSizes = &outSize;
+    outDesc.bufElSizes = &outElemSize;
+
+    AACENC_InArgs inArgs = {};
+    inArgs.numInSamples = numInSamples;
+    AACENC_OutArgs outArgs = {};
+
+    const AACENC_ERROR err = aacEncEncode(m_encoder, &inDesc, &outDesc, &inArgs, &outArgs);
+    if (err != AACENC_OK) {
+        std::cerr << "AacEncoder: aacEncEncode failed: " << err << std::endl;
+        return false;
     }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pBuffer->SetCurrentLength(cbBuffer);
-    }
-    
-    // Create a new sample
-    if (SUCCEEDED(hr)) {
-        hr = MFCreateSample(&pSample);
-    }
-    
-    if (SUCCEEDED(hr)) {
-        hr = pSample->AddBuffer(pBuffer);
-    }
-    
-    // Set timestamp and duration
-    if (SUCCEEDED(hr)) {
-        // duration in 100-nanoseconds units
-        // 1 second = 10,000,000 units
-        // duration = frameSize / sampleRate * 10,000,000
-        LONGLONG duration = (LONGLONG)frameSize * 10000000 / m_sampleRate;
-        
-        hr = pSample->SetSampleTime(m_duration);
-        if (SUCCEEDED(hr)) {
-            hr = pSample->SetSampleDuration(duration);
+
+    if (outArgs.numOutBytes > 0) {
+        m_outputFile.write(reinterpret_cast<const char*>(m_outputBuffer.data()), outArgs.numOutBytes);
+        if (!m_outputFile.good()) {
+            std::cerr << "AacEncoder: Failed writing encoded data." << std::endl;
+            return false;
         }
-        
-        m_duration += duration;
     }
-    
-    if (SUCCEEDED(hr)) {
-        hr = m_pSinkWriter->WriteSample(m_streamIndex, pSample);
-    } else {
-        std::cerr << "EncodeFrame setup failed: " << hr << std::endl;
+
+    return true;
+}
+
+void AacEncoder::FlushEncoder() {
+    if (m_encoder == nullptr || !m_outputFile.is_open()) {
+        return;
     }
-    
-    if (FAILED(hr)) {
-        std::cerr << "WriteSample failed: " << hr << std::endl;
+
+    while (true) {
+        void* outBuffer = m_outputBuffer.data();
+        INT outIdentifier = OUT_BITSTREAM_DATA;
+        INT outElemSize = 1;
+        INT outSize = static_cast<INT>(m_outputBuffer.size());
+        AACENC_BufDesc outDesc = {};
+        outDesc.numBufs = 1;
+        outDesc.bufs = &outBuffer;
+        outDesc.bufferIdentifiers = &outIdentifier;
+        outDesc.bufSizes = &outSize;
+        outDesc.bufElSizes = &outElemSize;
+
+        AACENC_InArgs inArgs = {};
+        inArgs.numInSamples = -1;
+        AACENC_OutArgs outArgs = {};
+
+        const AACENC_ERROR err = aacEncEncode(m_encoder, nullptr, &outDesc, &inArgs, &outArgs);
+        if (err != AACENC_OK && err != AACENC_ENCODE_EOF) {
+            std::cerr << "AacEncoder: Flush failed: " << err << std::endl;
+            break;
+        }
+
+        if (outArgs.numOutBytes > 0) {
+            m_outputFile.write(reinterpret_cast<const char*>(m_outputBuffer.data()), outArgs.numOutBytes);
+            if (!m_outputFile.good()) {
+                std::cerr << "AacEncoder: Failed writing flushed data." << std::endl;
+                break;
+            }
+        }
+
+        if (err == AACENC_ENCODE_EOF || outArgs.numOutBytes == 0) {
+            break;
+        }
     }
-    
-    SafeRelease(&pSample);
-    SafeRelease(&pBuffer);
-    
-    return SUCCEEDED(hr);
 }
 
 void AacEncoder::Finalize() {
     std::lock_guard<std::mutex> lock(m_mutex);
-    
-    if (m_pSinkWriter) {
-        m_pSinkWriter->Finalize();
-        SafeRelease(&m_pSinkWriter);
+
+    if (!m_initialized) {
+        return;
     }
+
+    FlushEncoder();
+
+    if (m_encoder != nullptr) {
+        aacEncClose(&m_encoder);
+    }
+
+    if (m_outputFile.is_open()) {
+        m_outputFile.flush();
+        m_outputFile.close();
+    }
+
+    m_outputBuffer.clear();
     m_initialized = false;
 }
 
