@@ -12,12 +12,32 @@ project(${PROJECT_NAME} LANGUAGES CXX C)
 # not be changed
 set(PLUGIN_NAME "record_windows_plugin")
 
-# Bundle libfdk-aac and build it statically for the plugin.
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static fdk-aac" FORCE)
-set(BUILD_PROGRAMS OFF CACHE BOOL "Disable fdk-aac tools" FORCE)
-set(FDK_AAC_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "Disable fdk-aac install config" FORCE)
-set(FDK_AAC_INSTALL_PKGCONFIG_MODULE OFF CACHE BOOL "Disable fdk-aac pkgconfig" FORCE)
-add_subdirectory("third_party/fdk-aac" EXCLUDE_FROM_ALL)
+# Use bundled prebuilt fdk-aac binaries.
+if(CMAKE_VS_PLATFORM_NAME STREQUAL "ARM64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
+  message(FATAL_ERROR "No prebuilt fdk-aac package for platform: ARM64")
+elseif(CMAKE_VS_PLATFORM_NAME STREQUAL "x64" OR CMAKE_SIZEOF_VOID_P EQUAL 8)
+  set(FDK_AAC_PREBUILT_TRIPLET "win-x64")
+else()
+  message(FATAL_ERROR "No prebuilt fdk-aac package for this platform")
+endif()
+
+set(FDK_AAC_PREBUILT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/prebuilt/fdk-aac/${FDK_AAC_PREBUILT_TRIPLET}")
+set(FDK_AAC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/prebuilt/fdk-aac/include")
+set(FDK_AAC_DLL "${FDK_AAC_PREBUILT_DIR}/bin/fdk-aac.dll")
+set(FDK_AAC_IMPLIB "${FDK_AAC_PREBUILT_DIR}/lib/fdk-aac.lib")
+
+if(NOT EXISTS "${FDK_AAC_DLL}")
+  message(FATAL_ERROR "Missing prebuilt fdk-aac DLL: ${FDK_AAC_DLL}")
+endif()
+if(NOT EXISTS "${FDK_AAC_IMPLIB}")
+  message(FATAL_ERROR "Missing prebuilt fdk-aac import library: ${FDK_AAC_IMPLIB}")
+endif()
+
+add_library(fdk-aac SHARED IMPORTED GLOBAL)
+set_target_properties(fdk-aac PROPERTIES
+  IMPORTED_LOCATION "${FDK_AAC_DLL}"
+  IMPORTED_IMPLIB "${FDK_AAC_IMPLIB}"
+)
 
 # Any new source files that you add to the plugin should be added here.
 list(APPEND PLUGIN_SOURCES
@@ -75,6 +95,7 @@ target_include_directories(${PLUGIN_NAME} INTERFACE
 target_include_directories(${PLUGIN_NAME} PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/encoder"
+  "${FDK_AAC_INCLUDE_DIR}"
 )
 
 if(MSVC)
@@ -87,6 +108,6 @@ target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin fdk-
 # This list could contain prebuilt libraries, or libraries created by an
 # external build triggered from this build file.
 set(record_windows_bundled_libraries
-  ""
+  "${FDK_AAC_DLL}"
   PARENT_SCOPE
 )
