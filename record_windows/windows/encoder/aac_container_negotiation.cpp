@@ -79,4 +79,45 @@ std::vector<uint32_t> BuildAacBitrateCandidates(int requestedBitrate, int sample
     return uniqueCandidates;
 }
 
+std::vector<uint32_t> BuildAacSampleRateCandidates(int requestedSampleRate) {
+    // Practical AAC-LC rates for voice/music pipelines on Windows MF.
+    const std::vector<uint32_t> supported = {
+        8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000
+    };
+
+    uint32_t requested = static_cast<uint32_t>(requestedSampleRate <= 0 ? 16000 : requestedSampleRate);
+    if (requested < supported.front()) requested = supported.front();
+    if (requested > supported.back()) requested = supported.back();
+
+    std::vector<uint32_t> candidates;
+    candidates.reserve(supported.size() + 1);
+    candidates.push_back(requested);
+    candidates.insert(candidates.end(), supported.begin(), supported.end());
+
+    std::vector<uint32_t> uniqueCandidates;
+    uniqueCandidates.reserve(candidates.size());
+    for (uint32_t v : candidates) {
+        if (std::find(uniqueCandidates.begin(), uniqueCandidates.end(), v) == uniqueCandidates.end()) {
+            uniqueCandidates.push_back(v);
+        }
+    }
+
+    // Nearest rate first. For ties, prefer lower rate to limit bandwidth.
+    std::stable_sort(uniqueCandidates.begin(), uniqueCandidates.end(), [requested](uint32_t a, uint32_t b) {
+        const int da = std::abs((int)a - (int)requested);
+        const int db = std::abs((int)b - (int)requested);
+        if (da == db) return a < b;
+        return da < db;
+    });
+
+    return uniqueCandidates;
+}
+
+std::vector<uint32_t> BuildAacChannelCandidates(int requestedChannels) {
+    if (requestedChannels <= 1) {
+        return {1, 2};
+    }
+    return {2, 1};
+}
+
 } // namespace record_windows
